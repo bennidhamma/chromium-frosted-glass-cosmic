@@ -1,6 +1,6 @@
-From 5e73a12ab7db6616cc08e7728cfd2b3ebac7779b Mon Sep 17 00:00:00 2001
+From 6c23d0db78aa1f3a5d1deda20b6635ba03fe60af Mon Sep 17 00:00:00 2001
 From: Ben Joldersma <bennidhamma@gmail.com>
-Date: Sat, 10 Oct 2026 16:14:22 -0700
+Date: Sat, 10 Oct 2026 16:25:43 -0700
 Subject: [PATCH 3/5] [Linux] Glass frame on Wayland compositors with
  background blur
 

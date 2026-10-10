@@ -1,7 +1,7 @@
-From c260e10b377132aefd151371a056661b37cb65d1 Mon Sep 17 00:00:00 2001
+From b7c94c5360a7a9c401d0e81f6a5d58d121c7eeb3 Mon Sep 17 00:00:00 2001
 From: Ben Joldersma <bennidhamma@gmail.com>
-Date: Sat, 10 Oct 2026 16:14:44 -0700
-Subject: [PATCH] [Packaging] Enable the glass frame by default; unofficial
+Date: Sat, 10 Oct 2026 16:25:47 -0700
+Subject: [PATCH 5/5] [Packaging] Enable the glass frame by default; unofficial
  branding
 
 - Glass only shows where the compositor supports

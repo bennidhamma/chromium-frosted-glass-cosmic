@@ -1,6 +1,6 @@
-From 5256d643e42bb3bf65de45d93f757a2fa00d8cc4 Mon Sep 17 00:00:00 2001
+From b82c7bf0184644755c626fc480c9e6d451ee7d5f Mon Sep 17 00:00:00 2001
 From: Ben Joldersma <bennidhamma@gmail.com>
-Date: Sat, 10 Oct 2026 16:14:20 -0700
+Date: Sat, 10 Oct 2026 16:25:41 -0700
 Subject: [PATCH 2/5] [Views] Blur behind translucent menus; grayscale text on
  glass
 
@@ -19,12 +19,13 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  ui/views/BUILD.gn                             |  1 +
  ui/views/controls/label.cc                    | 30 ++++++
  ui/views/controls/label.h                     |  7 ++
+ ui/views/controls/label_unittest.cc           | 27 +++--
  .../menu/menu_scroll_view_container.cc        | 59 +++++++++++
  .../menu/menu_scroll_view_container.h         |  8 ++
  ui/views/window/frame_view_utils_linux.cc     | 42 +++++++-
  ui/views/window/frame_view_utils_linux.h      | 13 +++
  .../window/frame_view_utils_linux_unittest.cc | 98 +++++++++++++++++++
- 8 files changed, 253 insertions(+), 5 deletions(-)
+ 9 files changed, 270 insertions(+), 15 deletions(-)
  create mode 100644 ui/views/window/frame_view_utils_linux_unittest.cc
 
 diff --git a/ui/views/BUILD.gn b/ui/views/BUILD.gn
@@ -40,10 +41,10 @@ index cb35a2682b..512c6b02e1 100644
      ]
      deps += [
 diff --git a/ui/views/controls/label.cc b/ui/views/controls/label.cc
-index 5021556c78..082b4aab47 100644
+index 5021556c78..b1576b7f41 100644
 --- a/ui/views/controls/label.cc
 +++ b/ui/views/controls/label.cc
-@@ -917,6 +917,17 @@ void Label::PaintText(gfx::Canvas* canvas) {
+@@ -917,6 +917,16 @@ void Label::PaintText(gfx::Canvas* canvas) {
    MaybeBuildDisplayText();
  
    if (display_text_) {
@@ -51,17 +52,16 @@ index 5021556c78..082b4aab47 100644
 +    // Subpixel rendering samples the color channels underneath the text, so it
 +    // only works on opaque surfaces. Labels on translucent surfaces, e.g. the
 +    // glass frame or menus of glass windows, fall back to grayscale
-+    // antialiasing.
-+    if (!display_text_->subpixel_rendering_suppressed() &&
-+        !skip_subpixel_rendering_opacity_check_ &&
-+        !IsPaintedOnOpaqueSurface()) {
-+      display_text_->set_subpixel_rendering_suppressed(true);
-+    }
++    // antialiasing. Decided at paint time since the surface can change.
++    display_text_->set_subpixel_rendering_suppressed(
++        !subpixel_rendering_enabled_ || !IsOpaque(GetBackgroundColor()) ||
++        (!skip_subpixel_rendering_opacity_check_ &&
++         !IsPaintedOnOpaqueSurface()));
 +#endif
      display_text_->Draw(canvas);
    }
  
-@@ -959,6 +970,25 @@ void Label::PaintText(gfx::Canvas* canvas) {
+@@ -959,6 +969,26 @@ void Label::PaintText(gfx::Canvas* canvas) {
  #endif
  }
  
@@ -80,7 +80,8 @@ index 5021556c78..082b4aab47 100644
 +      return view->layer()->fills_bounds_opaquely();
 +    }
 +  }
-+  return false;
++  // Like the DCHECK in PaintText(), assume that the widget paints opaquely.
++  return true;
 +}
 +#endif
 +
@@ -112,6 +113,65 @@ index b1ccc704de..0984c73912 100644
    // View:
    void OnBoundsChanged(const gfx::Rect& previous_bounds) override;
    void VisibilityChanged(View* starting_from, bool is_visible) override;
+diff --git a/ui/views/controls/label_unittest.cc b/ui/views/controls/label_unittest.cc
+index 5f174d6eaa..67d4373bd9 100644
+--- a/ui/views/controls/label_unittest.cc
++++ b/ui/views/controls/label_unittest.cc
+@@ -1343,37 +1343,44 @@ TEST_F(LabelTest, GetSubstringBounds) {
+ #define MAYBE_ChecksSubpixelRenderingOntoOpaqueSurface \
+   ChecksSubpixelRenderingOntoOpaqueSurface
+ #endif
+-// Ensures DCHECK for subpixel rendering on transparent layer is working.
++// Ensures subpixel rendering is only used when painting onto an opaque
++// surface, and that labels fall back to grayscale antialiasing otherwise.
+ TEST_F(LabelTest, MAYBE_ChecksSubpixelRenderingOntoOpaqueSurface) {
+   View* view =
+       widget()->GetContentsView()->AddChildView(std::make_unique<View>());
+   Label* label = view->AddChildView(std::make_unique<TestLabel>());
++  label->SetText(u"Text");
+   EXPECT_TRUE(label->GetSubpixelRenderingEnabled());
+ 
+   gfx::Canvas canvas;
++  const auto subpixel_rendering_suppressed = [&] {
++    return label->display_text_->subpixel_rendering_suppressed();
++  };
+ 
+-  // Painting on a view not painted to a layer should be fine.
++  // Painting on a view not painted to a layer uses subpixel rendering.
+   label->OnPaint(&canvas);
++  EXPECT_FALSE(subpixel_rendering_suppressed());
+ 
+-  // Painting to an opaque layer should also be fine.
++  // So does painting to an opaque layer.
+   view->SetPaintToLayer();
+   label->OnPaint(&canvas);
++  EXPECT_FALSE(subpixel_rendering_suppressed());
+ 
+-  // Set up a transparent layer for the parent view.
++  // Painting on a transparent layer falls back to grayscale antialiasing.
+   view->layer()->SetFillsBoundsOpaquely(false);
++  label->OnPaint(&canvas);
++  EXPECT_TRUE(subpixel_rendering_suppressed());
+ 
+-  // Painting on a transparent layer should DCHECK.
+-  EXPECT_DCHECK_DEATH(label->OnPaint(&canvas));
+-
+-  // We should not DCHECK if the check is skipped.
++  // Unless the check is skipped.
+   label->SetSkipSubpixelRenderingOpacityCheck(true);
+   label->OnPaint(&canvas);
++  EXPECT_FALSE(subpixel_rendering_suppressed());
+   label->SetSkipSubpixelRenderingOpacityCheck(false);
+ 
+-  // Painting onto a transparent layer should not DCHECK if there's an opaque
+-  // background in a parent of the Label.
++  // An opaque background in a parent of the Label counts as an opaque surface.
+   view->SetBackground(CreateSolidBackground(SK_ColorWHITE));
+   label->OnPaint(&canvas);
++  EXPECT_FALSE(subpixel_rendering_suppressed());
+ }
+ 
+ #if BUILDFLAG(SUPPORTS_AX_TEXT_OFFSETS)
 diff --git a/ui/views/controls/menu/menu_scroll_view_container.cc b/ui/views/controls/menu/menu_scroll_view_container.cc
 index 34760e09f7..a36dc843ff 100644
 --- a/ui/views/controls/menu/menu_scroll_view_container.cc
