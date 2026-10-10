@@ -1,0 +1,14 @@
+# GN args for the packaged build: optimized, non-component, no debug info.
+is_debug = false
+is_component_build = false
+dcheck_always_on = false
+symbol_level = 0
+blink_symbol_level = 0
+v8_symbol_level = 0
+use_remoteexec = false
+use_siso = false
+treat_warnings_as_errors = false
+chrome_pgo_phase = 0
+# No patent-encumbered codecs (H.264, AAC) in a redistributed binary.
+proprietary_codecs = false
+ffmpeg_branding = "Chromium"

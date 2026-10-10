@@ -1,0 +1,102 @@
+From c356283acd059ed6040b32e8e06f94c35ef2fe6e Mon Sep 17 00:00:00 2001
+From: Ben Joldersma <bennidhamma@gmail.com>
+Date: Sat, 10 Oct 2026 16:15:34 -0700
+Subject: [PATCH] blur: interpret blur regions surface-local and place popup
+ blur correctly
+
+ext-background-effect-v1 specifies the blur region in surface-local
+coordinates, but the blur element is positioned at the window geometry
+of the surface. For clients whose window geometry does not start at the
+surface origin (e.g. client-side decorations with shadows, such as
+Chromium), the blur was shifted by the geometry offset. Translate the
+region by the surface's offset from the blur geometry.
+
+For popups, the blur geometry was placed at the popup's own window
+geometry offset added to the toplevel's surface location, instead of at
+the popup's actual window geometry, which is relative to the toplevel's
+window geometry. That misplaced the blurred area by the difference of
+the two offsets. Place it at the popup's real window geometry.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/backend/render/wayland/blur_effect.rs | 9 ++++++++-
+ src/backend/render/wayland/mod.rs         | 6 ++++++
+ src/shell/element/surface.rs              | 6 +++++-
+ 3 files changed, 19 insertions(+), 2 deletions(-)
+
+diff --git a/src/backend/render/wayland/blur_effect.rs b/src/backend/render/wayland/blur_effect.rs
+index b8a7935..7fdad6f 100644
+--- a/src/backend/render/wayland/blur_effect.rs
++++ b/src/backend/render/wayland/blur_effect.rs
+@@ -185,6 +185,7 @@ impl BlurElement {
+         renderer: &mut R,
+         states: &SurfaceData,
+         geometry: Rectangle<f64, Logical>,
++        surface_offset: Point<f64, Logical>,
+         output_scale: f64,
+         radii: [u8; 4],
+         strength: usize,
+@@ -193,6 +194,12 @@ impl BlurElement {
+         let Some(region) = blur_region_state.current().blur_region.as_ref() else {
+             return Ok(None);
+         };
++        // Translate the surface-local region into `geometry`'s coordinate space.
++        let surface_offset = surface_offset.to_i32_round();
++        let region = region
++            .iter()
++            .map(|rect| Rectangle::new(rect.loc + surface_offset, rect.size))
++            .collect::<Vec<_>>();
+ 
+         let state = states
+             .data_map
+@@ -202,7 +209,7 @@ impl BlurElement {
+             renderer,
+             &mut state.lock().unwrap(),
+             geometry,
+-            region,
++            &region,
+             output_scale,
+             radii,
+             strength,
+diff --git a/src/backend/render/wayland/mod.rs b/src/backend/render/wayland/mod.rs
+index c2b7d4e..ce6df2e 100644
+--- a/src/backend/render/wayland/mod.rs
++++ b/src/backend/render/wayland/mod.rs
+@@ -90,10 +90,16 @@ pub fn push_render_elements_from_surface_tree<R>(
+                     ) {
+                         Ok(Some(surface)) => {
+                             let blur_geo = blur_geometry.unwrap_or(geometry);
++                            // The blur region is surface-local, but the blur element is
++                            // positioned at `blur_geo`, which for toplevels is the window
++                            // geometry. That doesn't start at the surface origin for clients
++                            // that draw their own decorations (e.g. CSD shadows).
++                            let surface_offset = location.to_logical(scale) - blur_geo.loc;
+                             blur = BlurElement::from_surface(
+                                 renderer,
+                                 states,
+                                 blur_geo,
++                                surface_offset,
+                                 scale.x,
+                                 radii,
+                                 blur_strength,
+diff --git a/src/shell/element/surface.rs b/src/shell/element/surface.rs
+index 58cdd8b..81e40d0 100644
+--- a/src/shell/element/surface.rs
++++ b/src/shell/element/surface.rs
+@@ -898,8 +898,12 @@ impl CosmicSurface {
+                 for (popup, popup_offset) in PopupManager::popups_for_surface(surface) {
+                     let offset = (self.0.geometry().loc + popup_offset - popup.geometry().loc)
+                         .to_physical_precise_round(scale);
++                    // `popup_offset` is relative to the toplevel's window geometry, so
++                    // the popup's own window geometry starts at the toplevel's
++                    // geometry origin plus that offset.
+                     let mut geometry = popup.geometry().to_f64();
+-                    geometry.loc += location.to_f64().to_logical(scale) + popup_offset.to_f64();
++                    geometry.loc = location.to_f64().to_logical(scale)
++                        + (self.0.geometry().loc + popup_offset).to_f64();
+                     let radii = with_states(popup.wl_surface(), |states| {
+                         surface_corners(states, geometry.size.to_i32_round())
+                     })
+-- 
+2.43.0
+

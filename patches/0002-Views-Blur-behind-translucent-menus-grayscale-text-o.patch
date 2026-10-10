@@ -1,0 +1,444 @@
+From 5256d643e42bb3bf65de45d93f757a2fa00d8cc4 Mon Sep 17 00:00:00 2001
+From: Ben Joldersma <bennidhamma@gmail.com>
+Date: Sat, 10 Oct 2026 16:14:20 -0700
+Subject: [PATCH 2/5] [Views] Blur behind translucent menus; grayscale text on
+ glass
+
+- MenuScrollViewContainer asks the window system to blur behind the
+  menu's rounded body whenever the menu background is translucent
+  (e.g. menus of glass browser windows), via the new
+  PlatformWindow::SetBackgroundBlurRegion().
+- Labels that are not painted onto an opaque surface fall back to
+  grayscale antialiasing instead of subpixel rendering, which samples
+  the (transparent) color channels underneath.
+- frame_view_utils_linux gains helpers to rasterize a rounded window
+  shape into a pixel region and to subtract rects from a region.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ ui/views/BUILD.gn                             |  1 +
+ ui/views/controls/label.cc                    | 30 ++++++
+ ui/views/controls/label.h                     |  7 ++
+ .../menu/menu_scroll_view_container.cc        | 59 +++++++++++
+ .../menu/menu_scroll_view_container.h         |  8 ++
+ ui/views/window/frame_view_utils_linux.cc     | 42 +++++++-
+ ui/views/window/frame_view_utils_linux.h      | 13 +++
+ .../window/frame_view_utils_linux_unittest.cc | 98 +++++++++++++++++++
+ 8 files changed, 253 insertions(+), 5 deletions(-)
+ create mode 100644 ui/views/window/frame_view_utils_linux_unittest.cc
+
+diff --git a/ui/views/BUILD.gn b/ui/views/BUILD.gn
+index cb35a2682b..512c6b02e1 100644
+--- a/ui/views/BUILD.gn
++++ b/ui/views/BUILD.gn
+@@ -1512,6 +1512,7 @@ test("views_unittests") {
+   if (is_linux) {
+     sources += [
+       "window/frame_view_linux_unittest.cc",
++      "window/frame_view_utils_linux_unittest.cc",
+       "window/native_frame_view_linux_unittest.cc",
+     ]
+     deps += [
+diff --git a/ui/views/controls/label.cc b/ui/views/controls/label.cc
+index 5021556c78..082b4aab47 100644
+--- a/ui/views/controls/label.cc
++++ b/ui/views/controls/label.cc
+@@ -917,6 +917,17 @@ void Label::PaintText(gfx::Canvas* canvas) {
+   MaybeBuildDisplayText();
+ 
+   if (display_text_) {
++#if !BUILDFLAG(IS_CHROMEOS)
++    // Subpixel rendering samples the color channels underneath the text, so it
++    // only works on opaque surfaces. Labels on translucent surfaces, e.g. the
++    // glass frame or menus of glass windows, fall back to grayscale
++    // antialiasing.
++    if (!display_text_->subpixel_rendering_suppressed() &&
++        !skip_subpixel_rendering_opacity_check_ &&
++        !IsPaintedOnOpaqueSurface()) {
++      display_text_->set_subpixel_rendering_suppressed(true);
++    }
++#endif
+     display_text_->Draw(canvas);
+   }
+ 
+@@ -959,6 +970,25 @@ void Label::PaintText(gfx::Canvas* canvas) {
+ #endif
+ }
+ 
++#if !BUILDFLAG(IS_CHROMEOS)
++bool Label::IsPaintedOnOpaqueSurface() const {
++  for (const View* view = this; view; view = view->parent()) {
++    // If any parent has an opaque background, assume it covers the text
++    // bounds. See the matching DCHECK in PaintText() for caveats.
++    const auto* background = view->background();
++    const auto* color_provider = view->GetColorProvider();
++    if (background && color_provider &&
++        IsOpaque(background->color().ResolveToSkColor(color_provider))) {
++      return true;
++    }
++    if (view->layer()) {
++      return view->layer()->fills_bounds_opaquely();
++    }
++  }
++  return false;
++}
++#endif
++
+ void Label::OnBoundsChanged(const gfx::Rect& previous_bounds) {
+   ClearDisplayText();
+ 
+diff --git a/ui/views/controls/label.h b/ui/views/controls/label.h
+index b1ccc704de..0984c73912 100644
+--- a/ui/views/controls/label.h
++++ b/ui/views/controls/label.h
+@@ -12,6 +12,7 @@
+ #include <vector>
+ 
+ #include "base/gtest_prod_util.h"
++#include "build/build_config.h"
+ #include "ui/base/metadata/metadata_header_macros.h"
+ #include "ui/base/mojom/menu_source_type.mojom-forward.h"
+ #include "ui/color/color_id.h"
+@@ -374,6 +375,12 @@ class VIEWS_EXPORT Label : public View,
+ 
+   void PaintText(gfx::Canvas* canvas);
+ 
++#if !BUILDFLAG(IS_CHROMEOS)
++  // Returns whether this label is painted onto an opaque background or layer,
++  // which subpixel text rendering requires.
++  bool IsPaintedOnOpaqueSurface() const;
++#endif
++
+   // View:
+   void OnBoundsChanged(const gfx::Rect& previous_bounds) override;
+   void VisibilityChanged(View* starting_from, bool is_visible) override;
+diff --git a/ui/views/controls/menu/menu_scroll_view_container.cc b/ui/views/controls/menu/menu_scroll_view_container.cc
+index 34760e09f7..a36dc843ff 100644
+--- a/ui/views/controls/menu/menu_scroll_view_container.cc
++++ b/ui/views/controls/menu/menu_scroll_view_container.cc
+@@ -28,6 +28,9 @@
+ #include "ui/compositor/layer.h"
+ #include "ui/compositor/layer_tree_owner.h"
+ #include "ui/gfx/canvas.h"
++#include "ui/gfx/geometry/rect_conversions.h"
++#include "ui/gfx/geometry/rrect_f.h"
++#include "ui/gfx/geometry/skia_conversions.h"
+ #include "ui/gfx/color_palette.h"
+ #include "ui/gfx/geometry/rounded_corners_f.h"
+ #include "ui/views/accessibility/view_accessibility.h"
+@@ -48,6 +51,14 @@
+ #include "chromeos/constants/chromeos_features.h"
+ #endif  // BUILDFLAG(IS_CHROMEOS)
+ 
++#if BUILDFLAG(IS_LINUX)
++#include "ui/aura/window.h"
++#include "ui/aura/window_tree_host.h"
++#include "ui/platform_window/platform_window.h"
++#include "ui/views/widget/desktop_aura/desktop_window_tree_host_platform.h"
++#include "ui/views/window/frame_view_utils_linux.h"
++#endif  // BUILDFLAG(IS_LINUX)
++
+ namespace views {
+ 
+ namespace {
+@@ -375,6 +386,7 @@ void MenuScrollViewContainer::OnPaintBackground(gfx::Canvas* canvas) {
+ void MenuScrollViewContainer::OnThemeChanged() {
+   View::OnThemeChanged();
+   CreateBorder();
++  UpdateBackgroundBlur();
+ }
+ 
+ void MenuScrollViewContainer::OnBoundsChanged(
+@@ -397,6 +409,51 @@ void MenuScrollViewContainer::OnBoundsChanged(
+         any_scroll_button_visible ? 0
+                                   : background_rounded_corners_.lower_right());
+   }
++
++  UpdateBackgroundBlur();
++}
++
++void MenuScrollViewContainer::UpdateBackgroundBlur() {
++#if BUILDFLAG(IS_LINUX)
++  Widget* const widget = GetWidget();
++  const ui::ColorProvider* const color_provider = GetColorProvider();
++  if (!widget || !color_provider || !widget->GetNativeWindow()) {
++    return;
++  }
++  aura::WindowTreeHost* const host = widget->GetNativeWindow()->GetHost();
++  if (!host) {
++    return;
++  }
++  // Only menus that are platform windows of their own can request a blur.
++  auto* const desktop_host = DesktopWindowTreeHostPlatform::GetHostForWidget(
++      host->GetAcceleratedWidget());
++  if (!desktop_host || !desktop_host->platform_window()) {
++    return;
++  }
++
++  std::optional<std::vector<gfx::Rect>> blur_region;
++  const SkColor background_color = color_provider->GetColor(
++      border_color_id_.value_or(ui::kColorMenuBackground));
++  if (SkColorGetA(background_color) < SK_AlphaOPAQUE) {
++    // The background is the rounded body of the menu, without any shadow.
++    gfx::RectF body_bounds(GetLocalBounds());
++    gfx::RoundedCornersF body_corners = background_rounded_corners_;
++    if (bubble_border_) {
++      // Same as the bubble border's client rect.
++      body_bounds.Inset(gfx::InsetsF(bubble_border_->GetInsets()));
++      body_corners = bubble_border_->rounded_corners();
++    }
++    SkRRect body = SkRRect(gfx::RRectF(body_bounds, body_corners));
++    gfx::Point origin;
++    View::ConvertPointToWidget(this, &origin);
++    body.offset(origin.x(), origin.y());
++    blur_region = GetRegionInsideClip(
++        body, gfx::ToEnclosingRect(gfx::SkRectToRectF(body.rect())),
++        host->device_scale_factor());
++  }
++  desktop_host->platform_window()->SetBackgroundBlurRegion(
++      std::move(blur_region));
++#endif  // BUILDFLAG(IS_LINUX)
+ }
+ 
+ void MenuScrollViewContainer::DidScrollToTop() {
+@@ -427,6 +484,7 @@ void MenuScrollViewContainer::CreateDefaultBorder() {
+   // Update the background, which relies on the border. First set it to null
+   // to avoid dangling pointers, and then update it.
+   SetBackground(nullptr);
++  bubble_border_ = nullptr;
+   DCHECK_EQ(arrow_, BubbleBorder::NONE);
+   int corner_radius = GetCornerRadius();
+   outside_border_insets_ = {};
+@@ -549,6 +607,7 @@ void MenuScrollViewContainer::CreateBubbleBorder() {
+   } else {
+     SetBackground(std::make_unique<BubbleBackground>(bubble_border.get()));
+   }
++  bubble_border_ = bubble_border.get();
+   SetBorder(std::move(bubble_border));
+ }
+ 
+diff --git a/ui/views/controls/menu/menu_scroll_view_container.h b/ui/views/controls/menu/menu_scroll_view_container.h
+index 75a9a2e3ba..23c73e777e 100644
+--- a/ui/views/controls/menu/menu_scroll_view_container.h
++++ b/ui/views/controls/menu/menu_scroll_view_container.h
+@@ -57,6 +57,11 @@ class VIEWS_EXPORT MenuScrollViewContainer : public View {
+   void OnBoundsChanged(const gfx::Rect& previous_bounds) override;
+ 
+  private:
++  // Asks the window system to blur what is behind the menu's background if
++  // that background is translucent (e.g. for menus of glass browser windows),
++  // or to stop blurring otherwise.
++  void UpdateBackgroundBlur();
++
+   friend class MenuScrollView;
+ 
+   void DidScrollToTop();
+@@ -104,6 +109,9 @@ class VIEWS_EXPORT MenuScrollViewContainer : public View {
+   // If set the currently set border is a bubble border.
+   BubbleBorder::Arrow arrow_ = BubbleBorder::NONE;
+ 
++  // The current border if it is a bubble border, owned by this view.
++  raw_ptr<BubbleBorder> bubble_border_ = nullptr;
++
+   gfx::RoundedCornersF background_rounded_corners_;
+ 
+   // The portion of GetInsets() that represent the region outside the border
+diff --git a/ui/views/window/frame_view_utils_linux.cc b/ui/views/window/frame_view_utils_linux.cc
+index 677e7c5cfe..dd84e0e163 100644
+--- a/ui/views/window/frame_view_utils_linux.cc
++++ b/ui/views/window/frame_view_utils_linux.cc
+@@ -7,6 +7,8 @@
+ #include <cmath>
+ 
+ #include "base/notreached.h"
++#include "third_party/skia/include/core/SkMatrix.h"
++#include "third_party/skia/include/core/SkPath.h"
+ #include "third_party/skia/include/core/SkRRect.h"
+ #include "third_party/skia/include/core/SkRegion.h"
+ #include "ui/base/models/image_model.h"
+@@ -29,6 +31,14 @@ namespace {
+ 
+ constexpr int kBorderAlpha = 0x26;
+ 
++std::vector<gfx::Rect> RegionToRects(const SkRegion& region) {
++  std::vector<gfx::Rect> rects;
++  for (SkRegion::Iterator i(region); !i.done(); i.next()) {
++    rects.push_back(gfx::SkIRectToRect(i.rect()));
++  }
++  return rects;
++}
++
+ }  // namespace
+ 
+ void PaintRestoredFrameBorderLinux(gfx::Canvas& canvas,
+@@ -239,12 +249,34 @@ std::vector<gfx::Rect> GetRestoredOpaqueRegion(
+       std::ceil(translucent_top_area_height_dip * scale - rect.y()));
+   region.op(translucent_top_area_rect, SkRegion::kDifference_Op);
+ 
+-  // Convert the region to a list of rectangles.
+-  std::vector<gfx::Rect> opaque_region;
+-  for (SkRegion::Iterator i(region); !i.done(); i.next()) {
+-    opaque_region.push_back(gfx::SkIRectToRect(i.rect()));
++  return RegionToRects(region);
++}
++
++std::vector<gfx::Rect> GetRegionInsideClip(const SkRRect& clip_region,
++                                           const gfx::Rect& area_dip,
++                                           float scale) {
++  SkRRect clip_region_px;
++  if (!clip_region.transform(SkMatrix::Scale(scale, scale), &clip_region_px)) {
++    return {};
++  }
++  // Conservatively round the area inwards, and let Skia rasterize the rounded
++  // corners: only pixels whose centers are inside the clip are included.
++  const SkRegion area_px(
++      gfx::RectToSkIRect(gfx::ScaleToEnclosedRect(area_dip, scale)));
++  SkRegion region;
++  region.setPath(SkPath::RRect(clip_region_px), area_px);
++  return RegionToRects(region);
++}
++
++std::vector<gfx::Rect> SubtractRectFromRegion(
++    const std::vector<gfx::Rect>& region_px,
++    const gfx::Rect& rect_px) {
++  SkRegion region;
++  for (const auto& rect : region_px) {
++    region.op(gfx::RectToSkIRect(rect), SkRegion::kUnion_Op);
+   }
+-  return opaque_region;
++  region.op(gfx::RectToSkIRect(rect_px), SkRegion::kDifference_Op);
++  return RegionToRects(region);
+ }
+ 
+ }  // namespace views
+diff --git a/ui/views/window/frame_view_utils_linux.h b/ui/views/window/frame_view_utils_linux.h
+index 8259ece239..35eb48ceb3 100644
+--- a/ui/views/window/frame_view_utils_linux.h
++++ b/ui/views/window/frame_view_utils_linux.h
+@@ -93,6 +93,19 @@ VIEWS_EXPORT std::vector<gfx::Rect> GetRestoredOpaqueRegion(
+     float scale,
+     int translucent_top_area_height_dip);
+ 
++// Returns the part of `area_dip` that lies inside `clip_region` (both in
++// DIPs), as a list of rectangles in pixels. Rounded corners of `clip_region`
++// are rasterized, so the result never covers pixels outside of the clip.
++VIEWS_EXPORT std::vector<gfx::Rect> GetRegionInsideClip(
++    const SkRRect& clip_region,
++    const gfx::Rect& area_dip,
++    float scale);
++
++// Returns `region_px` with `rect_px` removed from it.
++VIEWS_EXPORT std::vector<gfx::Rect> SubtractRectFromRegion(
++    const std::vector<gfx::Rect>& region_px,
++    const gfx::Rect& rect_px);
++
+ }  // namespace views
+ 
+ #endif  // UI_VIEWS_WINDOW_FRAME_VIEW_UTILS_LINUX_H_
+diff --git a/ui/views/window/frame_view_utils_linux_unittest.cc b/ui/views/window/frame_view_utils_linux_unittest.cc
+new file mode 100644
+index 0000000000..a269c4e1e9
+--- /dev/null
++++ b/ui/views/window/frame_view_utils_linux_unittest.cc
+@@ -0,0 +1,98 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "ui/views/window/frame_view_utils_linux.h"
++
++#include <vector>
++
++#include "testing/gtest/include/gtest/gtest.h"
++#include "third_party/skia/include/core/SkRRect.h"
++#include "third_party/skia/include/core/SkRegion.h"
++#include "ui/gfx/geometry/rect.h"
++#include "ui/gfx/geometry/skia_conversions.h"
++
++namespace views {
++
++namespace {
++
++SkRegion ToSkRegion(const std::vector<gfx::Rect>& rects) {
++  SkRegion region;
++  for (const auto& rect : rects) {
++    region.op(gfx::RectToSkIRect(rect), SkRegion::kUnion_Op);
++  }
++  return region;
++}
++
++SkRRect MakeRoundedClip(const gfx::Rect& bounds, float top_radius) {
++  const SkVector radii[4] = {{top_radius, top_radius},
++                             {top_radius, top_radius},
++                             {0, 0},
++                             {0, 0}};
++  SkRRect rrect;
++  rrect.setRectRadii(gfx::RectToSkRect(bounds), radii);
++  return rrect;
++}
++
++}  // namespace
++
++TEST(FrameViewUtilsLinuxTest, RegionInsideRectangularClip) {
++  const SkRRect clip = SkRRect::MakeRect(SkRect::MakeWH(800, 600));
++  const auto region =
++      GetRegionInsideClip(clip, gfx::Rect(0, 0, 800, 80), /*scale=*/1.f);
++  EXPECT_EQ(ToSkRegion(region), SkRegion(SkIRect::MakeWH(800, 80)));
++}
++
++TEST(FrameViewUtilsLinuxTest, RegionInsideClipIsClippedToClip) {
++  // The area sticks out of the clip on every side, like the glass area of a
++  // window with client-side shadows does.
++  const SkRRect clip = SkRRect::MakeRect(SkRect::MakeXYWH(10, 10, 780, 580));
++  const auto region =
++      GetRegionInsideClip(clip, gfx::Rect(0, 0, 800, 80), /*scale=*/1.f);
++  EXPECT_EQ(ToSkRegion(region), SkRegion(SkIRect::MakeXYWH(10, 10, 780, 70)));
++}
++
++TEST(FrameViewUtilsLinuxTest, RegionInsideClipExcludesRoundedCorners) {
++  constexpr int kRadius = 12;
++  const SkRRect clip = MakeRoundedClip(gfx::Rect(0, 0, 800, 600), kRadius);
++  const SkRegion region = ToSkRegion(
++      GetRegionInsideClip(clip, gfx::Rect(0, 0, 800, 80), /*scale=*/1.f));
++
++  // The very corners are outside of the rounded clip...
++  EXPECT_FALSE(region.contains(0, 0));
++  EXPECT_FALSE(region.contains(799, 0));
++  // ...but the straight edges next to them, and the area below the corner
++  // radius, are inside.
++  EXPECT_TRUE(region.contains(kRadius, 0));
++  EXPECT_TRUE(region.contains(800 - kRadius - 1, 0));
++  EXPECT_TRUE(region.contains(0, kRadius));
++  EXPECT_TRUE(region.contains(799, kRadius));
++  // Nothing outside the requested area is included.
++  EXPECT_EQ(region.getBounds(), SkIRect::MakeWH(800, 80));
++}
++
++TEST(FrameViewUtilsLinuxTest, RegionInsideClipIsInPixels) {
++  const SkRRect clip = SkRRect::MakeRect(SkRect::MakeWH(800, 600));
++  const auto region =
++      GetRegionInsideClip(clip, gfx::Rect(0, 0, 400, 40), /*scale=*/2.f);
++  EXPECT_EQ(ToSkRegion(region), SkRegion(SkIRect::MakeWH(800, 80)));
++}
++
++TEST(FrameViewUtilsLinuxTest, SubtractRectFromRegion) {
++  const std::vector<gfx::Rect> region = {gfx::Rect(0, 0, 800, 600)};
++  EXPECT_EQ(
++      ToSkRegion(SubtractRectFromRegion(region, gfx::Rect(0, 0, 800, 80))),
++      SkRegion(SkIRect::MakeXYWH(0, 80, 800, 520)));
++
++  // Subtracting a rect that does not intersect leaves the region unchanged.
++  EXPECT_EQ(
++      ToSkRegion(SubtractRectFromRegion(region, gfx::Rect(900, 0, 10, 10))),
++      ToSkRegion(region));
++
++  // A vertical strip leaves the rest of the window.
++  EXPECT_EQ(
++      ToSkRegion(SubtractRectFromRegion(region, gfx::Rect(0, 0, 100, 600))),
++      SkRegion(SkIRect::MakeXYWH(100, 0, 700, 600)));
++}
++
++}  // namespace views
+-- 
+2.43.0
+

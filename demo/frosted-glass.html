@@ -1,0 +1,198 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Frosted Glass Demo</title>
+<style>
+  :root {
+    --blur: 24px;
+    --tint: 0.18;
+    --saturate: 160%;
+    --ink: #f4f6fb;
+    --muted: rgba(244, 246, 251, 0.72);
+  }
+
+  * { box-sizing: border-box; }
+
+  html, body {
+    margin: 0;
+    height: 100%;
+    font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    color: var(--ink);
+    background: #0b1020;
+    overflow: hidden;
+  }
+
+  /* A busy, moving backdrop so the blur has something to work on. */
+  .backdrop {
+    position: fixed;
+    inset: 0;
+    overflow: hidden;
+  }
+  .blob {
+    position: absolute;
+    width: 46vmax;
+    height: 46vmax;
+    border-radius: 50%;
+    filter: saturate(140%);
+    opacity: 0.9;
+    animation: drift 18s ease-in-out infinite alternate;
+  }
+  .blob.a { background: radial-gradient(circle at 30% 30%, #ff7ab6, #b5179e 60%, transparent 70%); left: -10vmax; top: -12vmax; }
+  .blob.b { background: radial-gradient(circle at 60% 40%, #4cc9f0, #4361ee 60%, transparent 70%); right: -14vmax; top: 10vmax; animation-duration: 22s; }
+  .blob.c { background: radial-gradient(circle at 50% 50%, #ffd166, #f77f00 60%, transparent 70%); left: 20vmax; bottom: -20vmax; animation-duration: 26s; }
+  .blob.d { background: radial-gradient(circle at 40% 60%, #80ffdb, #06d6a0 60%, transparent 70%); right: 10vmax; bottom: -10vmax; animation-duration: 15s; }
+  .stripes {
+    position: absolute;
+    inset: 0;
+    background: repeating-linear-gradient(115deg, rgba(255,255,255,0.08) 0 2px, transparent 2px 28px);
+    animation: slide 12s linear infinite;
+  }
+  .word {
+    position: absolute;
+    font-weight: 900;
+    font-size: 18vw;
+    letter-spacing: -0.04em;
+    color: rgba(255, 255, 255, 0.85);
+    left: 4vw;
+    top: 28vh;
+    white-space: nowrap;
+    animation: slide-word 20s ease-in-out infinite alternate;
+  }
+  @keyframes drift {
+    from { transform: translate(0, 0) scale(1); }
+    to   { transform: translate(12vmax, 8vmax) scale(1.15); }
+  }
+  @keyframes slide { to { background-position: 400px 0; } }
+  @keyframes slide-word { to { transform: translateX(-30vw); } }
+
+  /* The frosted glass itself. */
+  .glass {
+    background: rgba(255, 255, 255, var(--tint));
+    -webkit-backdrop-filter: blur(var(--blur)) saturate(var(--saturate));
+    backdrop-filter: blur(var(--blur)) saturate(var(--saturate));
+    border: 1px solid rgba(255, 255, 255, 0.28);
+    box-shadow: 0 10px 40px rgba(0, 0, 0, 0.25), inset 0 1px 0 rgba(255, 255, 255, 0.35);
+    border-radius: 20px;
+  }
+
+  main {
+    position: relative;
+    height: 100%;
+    display: grid;
+    place-items: center;
+    padding: 16px;
+  }
+
+  .panel {
+    width: min(560px, 100%);
+    padding: 28px;
+    touch-action: none;
+    cursor: grab;
+    position: absolute;
+  }
+  .panel:active { cursor: grabbing; }
+  h1 { margin: 0 0 6px; font-size: 28px; letter-spacing: -0.01em; }
+  p  { margin: 0 0 18px; color: var(--muted); }
+  code {
+    font: 13px/1 ui-monospace, "SF Mono", Menlo, monospace;
+    background: rgba(0, 0, 0, 0.25);
+    padding: 2px 6px;
+    border-radius: 6px;
+  }
+
+  .controls { display: grid; gap: 14px; }
+  label { display: grid; grid-template-columns: 90px 1fr 56px; align-items: center; gap: 12px; }
+  input[type=range] { width: 100%; accent-color: #fff; }
+  output { text-align: right; font-variant-numeric: tabular-nums; color: var(--muted); }
+
+  .chips { display: flex; gap: 10px; margin-top: 20px; flex-wrap: wrap; }
+  .chip {
+    padding: 8px 14px;
+    border-radius: 999px;
+    font-weight: 600;
+    font-size: 13px;
+  }
+
+  .mini {
+    position: absolute;
+    width: 180px;
+    padding: 16px;
+    border-radius: 16px;
+    font-size: 13px;
+    touch-action: none;
+    cursor: grab;
+  }
+  .mini strong { display: block; font-size: 22px; margin-top: 4px; }
+
+  @media (max-width: 600px) {
+    label { grid-template-columns: 70px 1fr 48px; }
+    .mini { display: none; }
+  }
+</style>
+</head>
+<body>
+  <div class="backdrop" aria-hidden="true">
+    <div class="blob a"></div>
+    <div class="blob b"></div>
+    <div class="blob c"></div>
+    <div class="blob d"></div>
+    <div class="stripes"></div>
+    <div class="word">frosted</div>
+  </div>
+
+  <main>
+    <section class="panel glass" id="panel">
+      <h1>Frosted glass</h1>
+      <p>Drag the cards around. Everything behind them is blurred live with
+        <code>backdrop-filter: blur()</code>, which works in Chrome today.</p>
+      <div class="controls">
+        <label>Blur <input id="blur" type="range" min="0" max="60" value="24"><output id="blur-out">24px</output></label>
+        <label>Tint <input id="tint" type="range" min="0" max="80" value="18"><output id="tint-out">0.18</output></label>
+        <label>Saturate <input id="sat" type="range" min="100" max="250" value="160"><output id="sat-out">160%</output></label>
+      </div>
+      <div class="chips">
+        <span class="chip glass">Glass chip</span>
+        <span class="chip glass">Another one</span>
+        <span class="chip glass">Third</span>
+      </div>
+    </section>
+
+    <div class="mini glass" style="left: 8vw; top: 10vh">Now playing<strong>Lo-fi beats</strong></div>
+    <div class="mini glass" style="right: 8vw; bottom: 12vh">Weather<strong>18° Clear</strong></div>
+  </main>
+
+<script>
+  const root = document.documentElement.style;
+  const bind = (id, prop, fmt) => {
+    const input = document.getElementById(id);
+    const out = document.getElementById(id + '-out');
+    const apply = () => { const v = fmt(input.value); root.setProperty(prop, v); out.textContent = v; };
+    input.addEventListener('input', apply);
+    apply();
+  };
+  bind('blur', '--blur', v => v + 'px');
+  bind('tint', '--tint', v => (v / 100).toFixed(2));
+  bind('sat', '--saturate', v => v + '%');
+
+  // Drag any glass card.
+  for (const el of document.querySelectorAll('.panel, .mini')) {
+    let start = null;
+    el.addEventListener('pointerdown', e => {
+      if (e.target.closest('input')) return;
+      const r = el.getBoundingClientRect();
+      start = { x: e.clientX - r.left, y: e.clientY - r.top };
+      el.setPointerCapture(e.pointerId);
+    });
+    el.addEventListener('pointermove', e => {
+      if (!start) return;
+      el.style.left = (e.clientX - start.x) + 'px';
+      el.style.top = (e.clientY - start.y) + 'px';
+      el.style.right = el.style.bottom = 'auto';
+    });
+    el.addEventListener('pointerup', () => { start = null; });
+  }
+</script>
+</body>
+</html>

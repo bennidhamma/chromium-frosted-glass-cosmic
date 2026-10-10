@@ -1,0 +1,92 @@
+From c260e10b377132aefd151371a056661b37cb65d1 Mon Sep 17 00:00:00 2001
+From: Ben Joldersma <bennidhamma@gmail.com>
+Date: Sat, 10 Oct 2026 16:14:44 -0700
+Subject: [PATCH] [Packaging] Enable the glass frame by default; unofficial
+ branding
+
+- Glass only shows where the compositor supports
+  ext-background-effect-v1 blur, so it is safe to enable everywhere.
+- Package as "chromium-frosted-glass", installed to
+  /opt/chromium-frosted-glass, with its own name, maintainer and
+  description, so it neither claims to be an official Chromium build
+  nor conflicts with one.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../linux/common/chromium-browser.info        | 20 +++++++++----------
+ ui/base/ui_base_features.cc                   |  6 ++++++
+ 2 files changed, 16 insertions(+), 10 deletions(-)
+
+diff --git a/chrome/installer/linux/common/chromium-browser.info b/chrome/installer/linux/common/chromium-browser.info
+index 395c019f7d..47df1584a7 100644
+--- a/chrome/installer/linux/common/chromium-browser.info
++++ b/chrome/installer/linux/common/chromium-browser.info
+@@ -6,37 +6,37 @@
+ # chromium-browser packages for various platforms.
+ 
+ # Base name of the package.
+-PACKAGE="chromium-browser"
++PACKAGE="chromium-frosted-glass"
+ 
+ # Filename of the main executable (for generating launcher scripts, etc.)
+ PROGNAME=chrome
+ 
+ # Base directory for package installation.
+-INSTALLDIR=/opt/chromium.org/chromium
++INSTALLDIR=/opt/chromium-frosted-glass
+ 
+ # Directory for device policy enrollments.
+ ENROLLMENTDIR=/etc/chromium/policies/enrollment
+ 
+ # Display string for desktop menu/icon.
+-MENUNAME="Chromium Web Browser"
++MENUNAME="Chromium Frosted Glass"
+ 
+ # Brief package description.
+-SHORTDESC="The web browser from the Chromium projects"
++SHORTDESC="Chromium with a frosted glass frame for COSMIC and other Wayland desktops"
+ 
+ # Detailed package description.
+-FULLDESC="Chromium is a browser that combines a minimal design with sophisticated technology to make the web faster, safer, and easier."
++FULLDESC="An unofficial build of Chromium with patches that blur the desktop behind the browser frame, menus and chrome:// pages, using the Wayland ext-background-effect-v1 protocol (COSMIC, KDE Plasma 6.7+, GNOME 51+). Not affiliated with the Chromium project or Google."
+ 
+ # Package maintainer information.
+-MAINTNAME="Chromium Linux Team"
+-MAINTMAIL="chromium-packagers@chromium.org"
+-PRODUCTURL="https://www.chromium.org/Home"
++MAINTNAME="Ben Joldersma"
++MAINTMAIL="bennidhamma@users.noreply.github.com"
++PRODUCTURL="https://github.com/bennidhamma/chromium-frosted-glass-cosmic"
+ 
+ PROJECT_LICENSE="BSD-3-Clause and LGPL-2.1+ and Apache-2.0 and IJG and MIT and GPL-2.0+ and ISC and OpenSSL and (MPL-1.1 or GPL-2.0 or LGPL-2.0)"
+ 
+ DEVELOPER_NAME="The Chromium Authors"
+ 
+-BUGTRACKERURL="https://www.chromium.org/for-testers/bug-reporting-guidelines"
++BUGTRACKERURL="https://github.com/bennidhamma/chromium-frosted-glass-cosmic/issues"
+ 
+ HELPURL="https://chromium.googlesource.com/chromium/src/+/main/docs/linux/debugging.md"
+ 
+-RDN="org.chromium.Chromium"
++RDN="io.github.bennidhamma.ChromiumFrostedGlass"
+diff --git a/ui/base/ui_base_features.cc b/ui/base/ui_base_features.cc
+index 0097e5d428..ffd2e73b78 100644
+--- a/ui/base/ui_base_features.cc
++++ b/ui/base/ui_base_features.cc
+@@ -518,7 +518,13 @@ BASE_FEATURE_PARAM(int,
+ 
+ BASE_FEATURE(kDesktopGlowUp, base::FEATURE_DISABLED_BY_DEFAULT);
+ 
++#if BUILDFLAG(IS_LINUX)
++// Glass only shows where the Wayland compositor can blur behind windows
++// (ext-background-effect-v1), so it is safe to enable everywhere else.
++BASE_FEATURE(kGlassFrame, base::FEATURE_ENABLED_BY_DEFAULT);
++#else
+ BASE_FEATURE(kGlassFrame, base::FEATURE_DISABLED_BY_DEFAULT);
++#endif
+ BASE_FEATURE_PARAM(bool, kGlassExpandOnHoverEnabled, &kGlassFrame, true);
+ BASE_FEATURE_PARAM(bool, kGlassFrameEnabledByDefault, &kGlassFrame, true);
+ #if BUILDFLAG(IS_LINUX)
+-- 
+2.43.0
+

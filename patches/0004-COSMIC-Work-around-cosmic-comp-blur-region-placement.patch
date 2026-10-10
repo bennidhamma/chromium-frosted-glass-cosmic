@@ -1,0 +1,284 @@
+From aa3903df87ab7df7088bc4a0cfd2d0b078266d03 Mon Sep 17 00:00:00 2001
+From: Ben Joldersma <bennidhamma@gmail.com>
+Date: Sat, 10 Oct 2026 16:14:43 -0700
+Subject: [PATCH 4/5] [COSMIC] Work around cosmic-comp blur region placement
+
+cosmic-comp positions ext-background-effect-v1 blur regions relative to
+the xdg window geometry rather than the surface, and offsets the area it
+blurs behind popups by the popup's window geometry offset minus its
+toplevel's. With client-side decorations (shadows) this misplaces the
+blur. Until cosmic-comp is fixed:
+
+- Shift blur regions to where cosmic-comp expects them, for toplevels
+  and popups.
+- Keep popups' window geometry offset no larger than their toplevel's,
+  so that the blurred area covers them; positioning uses the same
+  insets, so popups do not move.
+
+Enabled by WaylandBlurRegionRelativeToWindowGeometry, which defaults to
+on when XDG_CURRENT_DESKTOP contains COSMIC. Not intended for upstream:
+it misplaces the blur on correct compositors, and must be disabled once
+cosmic-comp is fixed.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ ui/ozone/common/features.cc                   | 26 ++++++++++++
+ ui/ozone/common/features.h                    |  5 +++
+ .../platform/wayland/host/wayland_popup.cc    | 40 +++++++++++++++++--
+ .../platform/wayland/host/wayland_popup.h     |  5 +++
+ .../platform/wayland/host/wayland_window.cc   | 23 +++++++++++
+ .../platform/wayland/host/wayland_window.h    |  2 +-
+ 6 files changed, 96 insertions(+), 5 deletions(-)
+
+diff --git a/ui/ozone/common/features.cc b/ui/ozone/common/features.cc
+index 774db0a07a..eef2cf0978 100644
+--- a/ui/ozone/common/features.cc
++++ b/ui/ozone/common/features.cc
+@@ -4,6 +4,12 @@
+ 
+ #include "ui/ozone/common/features.h"
+ 
++#include <optional>
++#include <string>
++
++#include "base/environment.h"
++#include "base/feature_list.h"
++
+ namespace ui {
+ 
+ // Overlay delegation is required for delegated compositing. This doesn't enable
+@@ -14,6 +20,13 @@ BASE_FEATURE(kWaylandOverlayDelegation, base::FEATURE_DISABLED_BY_DEFAULT);
+ // enabled.
+ BASE_FEATURE(kWaylandFractionalScaleV1, base::FEATURE_ENABLED_BY_DEFAULT);
+ 
++// Workaround for compositors that interpret the ext-background-effect-v1 blur
++// region relative to the xdg_surface window geometry instead of the surface
++// (cosmic-comp at the time of writing). Shifts the region so that it lands in
++// the right place on such compositors; it is wrong everywhere else.
++BASE_FEATURE(kWaylandBlurRegionRelativeToWindowGeometry,
++             base::FEATURE_DISABLED_BY_DEFAULT);
++
+ // Controls whether support for the xdg-toplevel-drag protocol should be
+ // enabled. On Lacros it will then be used even if the Exo-only extended-drag
+ // protocol is supported.
+@@ -58,6 +71,19 @@ bool IsWaylandFractionalScaleV1Enabled() {
+   return base::FeatureList::IsEnabled(kWaylandFractionalScaleV1);
+ }
+ 
++bool IsWaylandBlurRegionRelativeToWindowGeometryEnabled() {
++  if (const std::optional<bool> state = base::FeatureList::GetStateIfOverridden(
++          kWaylandBlurRegionRelativeToWindowGeometry)) {
++    return *state;
++  }
++  static const bool is_cosmic = [] {
++    const std::optional<std::string> desktop =
++        base::Environment::Create()->GetVar("XDG_CURRENT_DESKTOP");
++    return desktop && desktop->find("COSMIC") != std::string::npos;
++  }();
++  return is_cosmic;
++}
++
+ bool IsWaylandXdgToplevelDragEnabled() {
+   return base::FeatureList::IsEnabled(kWaylandXdgToplevelDrag);
+ }
+diff --git a/ui/ozone/common/features.h b/ui/ozone/common/features.h
+index 18fe4a7c77..644ef02bd6 100644
+--- a/ui/ozone/common/features.h
++++ b/ui/ozone/common/features.h
+@@ -11,6 +11,7 @@ namespace ui {
+ 
+ BASE_DECLARE_FEATURE(kWaylandOverlayDelegation);
+ BASE_DECLARE_FEATURE(kWaylandFractionalScaleV1);
++BASE_DECLARE_FEATURE(kWaylandBlurRegionRelativeToWindowGeometry);
+ BASE_DECLARE_FEATURE(kPrettyPrintDrmModesetConfigLogs);
+ BASE_DECLARE_FEATURE(kUseDynamicCursorSize);
+ BASE_DECLARE_FEATURE(kDispatchPointerEventsOnFrameEvent);
+@@ -20,6 +21,10 @@ extern const base::FeatureParam<double> kWaylandUnscaledTouchpadScrollingNewFact
+ 
+ bool IsWaylandOverlayDelegationEnabled();
+ bool IsWaylandFractionalScaleV1Enabled();
++// Whether to compensate for the blur region misplacement of some compositors.
++// Unless set explicitly, this is enabled on COSMIC, whose compositor is
++// affected.
++bool IsWaylandBlurRegionRelativeToWindowGeometryEnabled();
+ bool IsWaylandXdgToplevelDragEnabled();
+ bool IsPrettyPrintDrmModesetConfigLogsEnabled();
+ bool IsUseDynamicCursorSizeEnabled();
+diff --git a/ui/ozone/platform/wayland/host/wayland_popup.cc b/ui/ozone/platform/wayland/host/wayland_popup.cc
+index b5c221d0f9..6025275e30 100644
+--- a/ui/ozone/platform/wayland/host/wayland_popup.cc
++++ b/ui/ozone/platform/wayland/host/wayland_popup.cc
+@@ -4,8 +4,11 @@
+ 
+ #include "ui/ozone/platform/wayland/host/wayland_popup.h"
+ 
++#include <algorithm>
++
+ #include <optional>
+ 
++#include "base/feature_list.h"
+ #include "base/logging.h"
+ #include "base/numerics/safe_conversions.h"
+ #include "base/strings/utf_string_conversions.h"
+@@ -14,6 +17,7 @@
+ #include "ui/gfx/geometry/point.h"
+ #include "ui/gfx/geometry/rect.h"
+ #include "ui/gfx/geometry/transform.h"
++#include "ui/ozone/common/features.h"
+ #include "ui/ozone/platform/wayland/common/wayland_object.h"
+ #include "ui/ozone/platform/wayland/common/wayland_util.h"
+ #include "ui/ozone/platform/wayland/host/wayland_buffer_manager_host.h"
+@@ -69,7 +73,7 @@ bool WaylandPopup::CreateShellPopup() {
+   auto bounds_dip =
+       wl::TranslateWindowBoundsToParentDIP(this, xdg_parent_window) -
+       xdg_parent_window->GetWindowGeometryOffsetInDIP();
+-  bounds_dip.Inset(delegate()->CalculateInsetsInDIP(GetPlatformWindowState()));
++  bounds_dip.Inset(GetWindowGeometryInsetsInDIP(GetPlatformWindowState()));
+ 
+   // At this point, both `bounds` and `anchor_rect` parameters here are in
+   // UI coordinates space (i.e ui_scale'd), as they have just been provided by
+@@ -208,7 +212,7 @@ void WaylandPopup::SetBoundsInDIP(const gfx::Rect& bounds_dip) {
+         wl::TranslateWindowBoundsToParentDIP(this, xdg_parent_window) -
+         xdg_parent_window->GetWindowGeometryOffsetInDIP();
+     bounds_dip_in_parent.Inset(
+-        delegate()->CalculateInsetsInDIP(GetPlatformWindowState()));
++        GetWindowGeometryInsetsInDIP(GetPlatformWindowState()));
+ 
+     // If Wayland moved the popup (for example, a dnd arrow icon), schedule
+     // redraw as Aura doesn't do that for moved surfaces. If redraw has not been
+@@ -256,7 +260,7 @@ void WaylandPopup::HandlePopupConfigure(const gfx::Rect& bounds_dip) {
+   // Bounds are in the geometry space. Need to add decoration insets backs. Note
+   // that the window state for WaylandPopup is always `kNormal` now, but we
+   // check `pending_configure_state_.window_state` to make it consistent.
+-  const auto insets = delegate()->CalculateInsetsInDIP(
++  const auto insets = GetWindowGeometryInsetsInDIP(
+       pending_configure_state_.window_state.value_or(
+           PlatformWindowState::kNormal));
+   pending_configure_state_.bounds_dip->Inset(-insets);
+@@ -336,10 +340,38 @@ void WaylandPopup::SetWindowGeometry(
+   gfx::Rect geometry_dip(gfx::ScaleToEnclosingRectIgnoringError(
+       gfx::Rect(state.bounds_dip.size()), state.ui_scale));
+ 
+-  geometry_dip.Inset(delegate()->CalculateInsetsInDIP(state.window_state));
++  geometry_dip.Inset(GetWindowGeometryInsetsInDIP(state.window_state));
+   xdg_popup_->SetWindowGeometry(geometry_dip);
+ }
+ 
++gfx::Vector2d WaylandPopup::GetWindowGeometryOffsetInDIP() const {
++  const gfx::Insets insets =
++      GetWindowGeometryInsetsInDIP(GetPlatformWindowState());
++  return {insets.left(), insets.top()};
++}
++
++gfx::Insets WaylandPopup::GetWindowGeometryInsetsInDIP(
++    PlatformWindowState window_state) const {
++  gfx::Insets insets = delegate()->CalculateInsetsInDIP(window_state);
++  if (IsWaylandBlurRegionRelativeToWindowGeometryEnabled()) {
++    // Affected compositors offset the area they blur behind a popup by the
++    // popup's window geometry offset minus its toplevel's. Make those match,
++    // as far as the popup's decorations allow, so the area covers the popup.
++    // Since positioning uses the same insets, the popup does not move.
++    const WaylandWindow* toplevel = this;
++    while (toplevel->parent_window()) {
++      toplevel = toplevel->parent_window();
++    }
++    if (toplevel != this) {
++      const gfx::Vector2d toplevel_offset =
++          toplevel->GetWindowGeometryOffsetInDIP();
++      insets.set_left(std::min(insets.left(), toplevel_offset.x()));
++      insets.set_top(std::min(insets.top(), toplevel_offset.y()));
++    }
++  }
++  return insets;
++}
++
+ void WaylandPopup::AckConfigure(uint32_t serial) {
+   if (xdg_popup_) {
+     xdg_popup_->AckConfigure(serial);
+diff --git a/ui/ozone/platform/wayland/host/wayland_popup.h b/ui/ozone/platform/wayland/host/wayland_popup.h
+index ab6e709785..d4fcf0ad1f 100644
+--- a/ui/ozone/platform/wayland/host/wayland_popup.h
++++ b/ui/ozone/platform/wayland/host/wayland_popup.h
+@@ -37,6 +37,7 @@ class WaylandPopup final : public WaylandWindow {
+   bool OnInitialize(PlatformWindowInitProperties properties,
+                     PlatformWindowDelegate::State* state) override;
+   WaylandPopup* AsWaylandPopup() override;
++  gfx::Vector2d GetWindowGeometryOffsetInDIP() const override;
+   void SetWindowGeometry(const PlatformWindowDelegate::State& state) override;
+   void UpdateWindowMask() override;
+   base::WeakPtr<WaylandWindow> AsWeakPtr() override;
+@@ -48,6 +49,10 @@ class WaylandPopup final : public WaylandWindow {
+   void SetBoundsInDIP(const gfx::Rect& bounds) override;
+ 
+  private:
++  // Returns the insets from the surface to the window geometry.
++  gfx::Insets GetWindowGeometryInsetsInDIP(
++      PlatformWindowState window_state) const;
++
+   // Creates a popup window, which is visible as a menu window.
+   bool CreateShellPopup();
+ 
+diff --git a/ui/ozone/platform/wayland/host/wayland_window.cc b/ui/ozone/platform/wayland/host/wayland_window.cc
+index 89951efc02..48fe5b2d54 100644
+--- a/ui/ozone/platform/wayland/host/wayland_window.cc
++++ b/ui/ozone/platform/wayland/host/wayland_window.cc
+@@ -13,6 +13,7 @@
+ #include <utility>
+ 
+ #include "base/auto_reset.h"
++#include "base/feature_list.h"
+ #include "base/functional/bind.h"
+ #include "base/logging.h"
+ #include "base/memory/scoped_refptr.h"
+@@ -38,6 +39,9 @@
+ #include "ui/gfx/geometry/rect_conversions.h"
+ #include "ui/gfx/geometry/rrect_f.h"
+ #include "ui/gfx/geometry/size.h"
++#include "ui/gfx/geometry/vector2d.h"
++#include "ui/gfx/geometry/vector2d_conversions.h"
++#include "ui/gfx/geometry/vector2d_f.h"
+ #include "ui/gfx/native_ui_types.h"
+ #include "ui/gfx/overlay_priority_hint.h"
+ #include "ui/ozone/common/bitmap_cursor.h"
+@@ -180,6 +184,25 @@ void WaylandWindow::UpdateWindowScale(bool update_bounds) {
+ 
+ void WaylandWindow::SetBackgroundBlurRegion(
+     std::optional<std::vector<gfx::Rect>> region_px) {
++  if (region_px && IsWaylandBlurRegionRelativeToWindowGeometryEnabled()) {
++    // Compensate for where the affected compositor puts the region, see the
++    // feature's description. For toplevels, the region ends up relative to
++    // their window geometry. For popups, it ends up offset by twice their own
++    // window geometry offset minus that of their toplevel.
++    gfx::Vector2d offset_dip = GetWindowGeometryOffsetInDIP();
++    if (AsWaylandPopup()) {
++      WaylandWindow* const toplevel = GetRootParentWindow();
++      offset_dip = gfx::Vector2d(2 * offset_dip.x(), 2 * offset_dip.y()) -
++                   (toplevel && toplevel != this
++                        ? toplevel->GetWindowGeometryOffsetInDIP()
++                        : gfx::Vector2d());
++    }
++    const gfx::Vector2d offset_px = gfx::ToRoundedVector2d(
++        gfx::ScaleVector2d(offset_dip, applied_state().window_scale));
++    for (auto& rect : *region_px) {
++      rect -= offset_px;
++    }
++  }
+   root_surface()->set_background_blur_region(std::move(region_px));
+ }
+ 
+diff --git a/ui/ozone/platform/wayland/host/wayland_window.h b/ui/ozone/platform/wayland/host/wayland_window.h
+index 71782a8070..3c8e3b0228 100644
+--- a/ui/ozone/platform/wayland/host/wayland_window.h
++++ b/ui/ozone/platform/wayland/host/wayland_window.h
+@@ -343,7 +343,7 @@ class WaylandWindow : public PlatformWindow,
+   virtual void SetWindowGeometry(const PlatformWindowDelegate::State& state);
+ 
+   // Returns the offset of the window geometry within the window surface.
+-  gfx::Vector2d GetWindowGeometryOffsetInDIP() const;
++  virtual gfx::Vector2d GetWindowGeometryOffsetInDIP() const;
+ 
+   // Returns a root parent window within the same hierarchy.
+   WaylandWindow* GetRootParentWindow();
+-- 
+2.43.0
+

@@ -1,0 +1,1170 @@
+From 4d2c6fac6f7de0d64ed9b6d24eee28809dc56479 Mon Sep 17 00:00:00 2001
+From: Ben Joldersma <bennidhamma@gmail.com>
+Date: Sat, 10 Oct 2026 16:14:18 -0700
+Subject: [PATCH 1/5] [Ozone/Wayland] Support ext-background-effect-v1
+ background blur
+
+Bind ext_background_effect_manager_v1 when the compositor offers it
+(COSMIC, Plasma 6.7+, Mutter 51+) and let windows request a blurred
+backdrop behind translucent regions:
+
+- BackgroundEffectManager wraps the global and tracks the blur
+  capability, notifying windows when the compositor grants or revokes
+  it.
+- WaylandSurface keeps the blur region as double-buffered pending
+  state alongside the opaque and input regions, creates the per-surface
+  effect object lazily, and resends the region when the buffer scale
+  changes. The region rounds outwards so thin rects that approximate
+  rounded corners survive fractional scales.
+- PlatformWindow::SetBackgroundBlurRegion() and
+  PlatformWindowDelegate::OnBackgroundBlurSupportChanged() expose this
+  to upper layers, and PlatformRuntimeProperties::
+  supports_background_blur reports the capability.
+
+Includes a fake-server implementation of the protocol and unit tests.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ third_party/wayland-protocols/BUILD.gn        |   4 +
+ ui/ozone/platform/wayland/BUILD.gn            |   7 +
+ .../platform/wayland/common/wayland_object.cc |   3 +
+ .../platform/wayland/common/wayland_object.h  |   2 +
+ .../wayland/host/background_effect_manager.cc |  87 +++++++++
+ .../wayland/host/background_effect_manager.h  |  62 ++++++
+ .../background_effect_manager_unittest.cc     | 182 ++++++++++++++++++
+ .../wayland/host/wayland_connection.cc        |   3 +
+ .../wayland/host/wayland_connection.h         |   7 +
+ .../platform/wayland/host/wayland_surface.cc  |  65 +++++++
+ .../platform/wayland/host/wayland_surface.h   |  18 ++
+ .../platform/wayland/host/wayland_window.cc   |   9 +
+ .../platform/wayland/host/wayland_window.h    |   6 +
+ .../wayland/ozone_platform_wayland.cc         |   5 +
+ .../platform/wayland/test/mock_surface.cc     |   8 +-
+ ui/ozone/platform/wayland/test/mock_surface.h |   9 +
+ .../wayland/test/test_background_effect.cc    | 104 ++++++++++
+ .../wayland/test/test_background_effect.h     |  77 ++++++++
+ .../test/test_wayland_server_thread.cc        |   4 +
+ .../wayland/test/test_wayland_server_thread.h |   5 +
+ ui/ozone/public/ozone_platform.h              |   6 +
+ ui/ozone/test/mock_platform_window_delegate.h |   1 +
+ ui/platform_window/platform_window.cc         |   3 +
+ ui/platform_window/platform_window.h          |   9 +
+ ui/platform_window/platform_window_delegate.h |   4 +
+ 25 files changed, 689 insertions(+), 1 deletion(-)
+ create mode 100644 ui/ozone/platform/wayland/host/background_effect_manager.cc
+ create mode 100644 ui/ozone/platform/wayland/host/background_effect_manager.h
+ create mode 100644 ui/ozone/platform/wayland/host/background_effect_manager_unittest.cc
+ create mode 100644 ui/ozone/platform/wayland/test/test_background_effect.cc
+ create mode 100644 ui/ozone/platform/wayland/test/test_background_effect.h
+
+diff --git a/third_party/wayland-protocols/BUILD.gn b/third_party/wayland-protocols/BUILD.gn
+index 7beb117992..0308942895 100644
+--- a/third_party/wayland-protocols/BUILD.gn
++++ b/third_party/wayland-protocols/BUILD.gn
+@@ -11,6 +11,10 @@ wayland_protocol("alpha_compositing_protocol") {
+   sources = [ "unstable/alpha-compositing/alpha-compositing-unstable-v1.xml" ]
+ }
+ 
++wayland_protocol("background_effect_protocol") {
++  sources = [ "src/staging/ext-background-effect/ext-background-effect-v1.xml" ]
++}
++
+ wayland_protocol("color_management_protocol") {
+   sources = [ "src/staging/color-management/color-management-v1.xml" ]
+ }
+diff --git a/ui/ozone/platform/wayland/BUILD.gn b/ui/ozone/platform/wayland/BUILD.gn
+index 5b239de066..23fc001af9 100644
+--- a/ui/ozone/platform/wayland/BUILD.gn
++++ b/ui/ozone/platform/wayland/BUILD.gn
+@@ -47,6 +47,8 @@ source_set("wayland") {
+     "gpu/wayland_surface_factory.cc",
+     "gpu/wayland_surface_factory.h",
+     "gpu/wayland_surface_gpu.h",
++    "host/background_effect_manager.cc",
++    "host/background_effect_manager.h",
+     "host/begin_frame_source_wayland.cc",
+     "host/begin_frame_source_wayland.h",
+     "host/drm_syncobj_ioctl_wrapper.cc",
+@@ -256,6 +258,7 @@ source_set("wayland") {
+     "//third_party/wayland:wayland_egl",
+     "//third_party/wayland:wayland_util",
+     "//third_party/wayland-protocols:alpha_compositing_protocol",
++    "//third_party/wayland-protocols:background_effect_protocol",
+     "//third_party/wayland-protocols:color_management_protocol",
+     "//third_party/wayland-protocols:content_type_protocol",
+     "//third_party/wayland-protocols:cursor_shape_protocol",
+@@ -424,6 +427,8 @@ source_set("test_support") {
+     "test/test_alpha_blending.h",
+     "test/test_alpha_compositing.cc",
+     "test/test_alpha_compositing.h",
++    "test/test_background_effect.cc",
++    "test/test_background_effect.h",
+     "test/test_buffer.cc",
+     "test/test_buffer.h",
+     "test/test_compositor.cc",
+@@ -508,6 +513,7 @@ source_set("test_support") {
+     "//third_party/wayland:wayland_client",
+     "//third_party/wayland:wayland_server",
+     "//third_party/wayland-protocols:alpha_compositing_protocol",
++    "//third_party/wayland-protocols:background_effect_protocol",
+     "//third_party/wayland-protocols:fractional_scale_protocol",
+     "//third_party/wayland-protocols:gtk_primary_selection_protocol",
+     "//third_party/wayland-protocols:linux_dmabuf_protocol",
+@@ -532,6 +538,7 @@ source_set("wayland_unittests") {
+   sources = [
+     "common/wayland_util_unittest.cc",
+     "gpu/wayland_overlay_manager_unittest.cc",
++    "host/background_effect_manager_unittest.cc",
+     "host/begin_frame_source_wayland_unittest.cc",
+     "host/wayland_clipboard_unittest.cc",
+     "host/wayland_connection_unittest.cc",
+diff --git a/ui/ozone/platform/wayland/common/wayland_object.cc b/ui/ozone/platform/wayland/common/wayland_object.cc
+index 390c605ab8..43ab4fcb41 100644
+--- a/ui/ozone/platform/wayland/common/wayland_object.cc
++++ b/ui/ozone/platform/wayland/common/wayland_object.cc
+@@ -9,6 +9,7 @@
+ #include <color-management-v1-client-protocol.h>
+ #include <content-type-v1-client-protocol.h>
+ #include <cursor-shape-v1-client-protocol.h>
++#include <ext-background-effect-v1-client-protocol.h>
+ #include <ext-idle-notify-v1-client-protocol.h>
+ #include <extended-drag-unstable-v1-client-protocol.h>
+ #include <fractional-scale-v1-client-protocol.h>
+@@ -150,6 +151,8 @@ void (*ObjectTraits<wl_proxy>::deleter)(void*) = &wl_proxy_wrapper_destroy;
+   IMPLEMENT_WAYLAND_OBJECT_TRAITS_WITH_DELETER(TYPE, TYPE##_destroy)
+ 
+ // For convenience, keep aphabetical order in this list.
++IMPLEMENT_WAYLAND_OBJECT_TRAITS(ext_background_effect_manager_v1)
++IMPLEMENT_WAYLAND_OBJECT_TRAITS(ext_background_effect_surface_v1)
+ IMPLEMENT_WAYLAND_OBJECT_TRAITS(ext_idle_notifier_v1)
+ IMPLEMENT_WAYLAND_OBJECT_TRAITS(ext_idle_notification_v1)
+ IMPLEMENT_WAYLAND_OBJECT_TRAITS(gtk_primary_selection_device)
+diff --git a/ui/ozone/platform/wayland/common/wayland_object.h b/ui/ozone/platform/wayland/common/wayland_object.h
+index d746805691..6619fb7626 100644
+--- a/ui/ozone/platform/wayland/common/wayland_object.h
++++ b/ui/ozone/platform/wayland/common/wayland_object.h
+@@ -103,6 +103,8 @@ bool CanBind(const std::string& interface,
+   }  // namespace wl
+ 
+ // For convenience, keep aphabetical order in this list.
++DECLARE_WAYLAND_OBJECT_TRAITS(ext_background_effect_manager_v1)
++DECLARE_WAYLAND_OBJECT_TRAITS(ext_background_effect_surface_v1)
+ DECLARE_WAYLAND_OBJECT_TRAITS(ext_idle_notifier_v1)
+ DECLARE_WAYLAND_OBJECT_TRAITS(ext_idle_notification_v1)
+ DECLARE_WAYLAND_OBJECT_TRAITS(gtk_primary_selection_device)
+diff --git a/ui/ozone/platform/wayland/host/background_effect_manager.cc b/ui/ozone/platform/wayland/host/background_effect_manager.cc
+new file mode 100644
+index 0000000000..327f72c8a2
+--- /dev/null
++++ b/ui/ozone/platform/wayland/host/background_effect_manager.cc
+@@ -0,0 +1,87 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "ui/ozone/platform/wayland/host/background_effect_manager.h"
++
++#include <ext-background-effect-v1-client-protocol.h>
++
++#include "base/check_op.h"
++#include "base/logging.h"
++#include "ui/ozone/platform/wayland/host/wayland_connection.h"
++#include "ui/ozone/platform/wayland/host/wayland_window.h"
++#include "ui/ozone/platform/wayland/host/wayland_window_manager.h"
++
++namespace ui {
++
++namespace {
++constexpr uint32_t kMaxVersion = 1;
++}
++
++// static
++void BackgroundEffectManager::Instantiate(WaylandConnection* connection,
++                                          wl_registry* registry,
++                                          uint32_t name,
++                                          const std::string& interface,
++                                          uint32_t version) {
++  CHECK_EQ(interface, kInterfaceName) << "Expected \"" << kInterfaceName
++                                      << "\" but got \"" << interface << "\"";
++
++  if (connection->background_effect_manager_) {
++    return;
++  }
++
++  auto manager = wl::Bind<ext_background_effect_manager_v1>(
++      registry, name, std::min(version, kMaxVersion));
++  if (!manager) {
++    LOG(ERROR) << "Failed to bind " << kInterfaceName;
++    return;
++  }
++  connection->background_effect_manager_ =
++      std::make_unique<BackgroundEffectManager>(manager.release(), connection);
++}
++
++BackgroundEffectManager::BackgroundEffectManager(
++    ext_background_effect_manager_v1* manager,
++    WaylandConnection* connection)
++    : manager_(manager), connection_(connection) {
++  static constexpr ext_background_effect_manager_v1_listener kListener = {
++      .capabilities = &OnCapabilities,
++  };
++  ext_background_effect_manager_v1_add_listener(manager_.get(), &kListener,
++                                                this);
++}
++
++BackgroundEffectManager::~BackgroundEffectManager() = default;
++
++wl::Object<ext_background_effect_surface_v1>
++BackgroundEffectManager::CreateBackgroundEffectSurface(wl_surface* surface) {
++  return wl::Object<ext_background_effect_surface_v1>(
++      ext_background_effect_manager_v1_get_background_effect(manager_.get(),
++                                                             surface));
++}
++
++// static
++void BackgroundEffectManager::OnCapabilities(
++    void* data,
++    ext_background_effect_manager_v1* manager,
++    uint32_t flags) {
++  auto* self = static_cast<BackgroundEffectManager*>(data);
++  const bool supports_blur =
++      flags & EXT_BACKGROUND_EFFECT_MANAGER_V1_CAPABILITY_BLUR;
++  if (self->supports_blur_ == supports_blur) {
++    return;
++  }
++  self->supports_blur_ = supports_blur;
++
++  // Let windows that already exist know, so that they can stop (or start)
++  // painting translucent backgrounds that rely on the compositor blurring
++  // whatever is behind them.
++  if (auto* window_manager = self->connection_->window_manager()) {
++    for (auto* window : window_manager->GetAllWindows()) {
++      window->OnBackgroundBlurSupportChanged();
++    }
++  }
++}
++
++}  // namespace ui
+diff --git a/ui/ozone/platform/wayland/host/background_effect_manager.h b/ui/ozone/platform/wayland/host/background_effect_manager.h
+new file mode 100644
+index 0000000000..e848c848bc
+--- /dev/null
++++ b/ui/ozone/platform/wayland/host/background_effect_manager.h
+@@ -0,0 +1,62 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef UI_OZONE_PLATFORM_WAYLAND_HOST_BACKGROUND_EFFECT_MANAGER_H_
++#define UI_OZONE_PLATFORM_WAYLAND_HOST_BACKGROUND_EFFECT_MANAGER_H_
++
++#include "base/memory/raw_ptr.h"
++#include "ui/ozone/platform/wayland/common/wayland_object.h"
++
++namespace ui {
++
++class WaylandConnection;
++
++// Wraps the ext_background_effect_manager_v1 global, which lets clients ask
++// the compositor to apply effects such as blur to whatever is behind the
++// translucent parts of a surface.
++// See: staging/ext-background-effect/ext-background-effect-v1.xml
++class BackgroundEffectManager
++    : public wl::GlobalObjectRegistrar<BackgroundEffectManager> {
++ public:
++  static constexpr char kInterfaceName[] = "ext_background_effect_manager_v1";
++
++  static void Instantiate(WaylandConnection* connection,
++                          wl_registry* registry,
++                          uint32_t name,
++                          const std::string& interface,
++                          uint32_t version);
++
++  BackgroundEffectManager(ext_background_effect_manager_v1* manager,
++                          WaylandConnection* connection);
++  BackgroundEffectManager(const BackgroundEffectManager&) = delete;
++  BackgroundEffectManager& operator=(const BackgroundEffectManager&) = delete;
++  ~BackgroundEffectManager();
++
++  // Whether the compositor currently applies blur. The compositor may revoke
++  // or grant the capability at any time (e.g. when the user changes a desktop
++  // setting); when revoked, previously set blur regions stop having an effect.
++  bool supports_blur() const { return supports_blur_; }
++
++  // Creates the background effect object for `surface`. The protocol allows
++  // at most one such object per wl_surface.
++  wl::Object<ext_background_effect_surface_v1> CreateBackgroundEffectSurface(
++      wl_surface* surface);
++
++ private:
++  // ext_background_effect_manager_v1_listener callbacks:
++  static void OnCapabilities(void* data,
++                             ext_background_effect_manager_v1* manager,
++                             uint32_t flags);
++
++  // Wayland object wrapped by this class.
++  wl::Object<ext_background_effect_manager_v1> manager_;
++
++  const raw_ptr<WaylandConnection> connection_;
++
++  bool supports_blur_ = false;
++};
++
++}  // namespace ui
++
++#endif  // UI_OZONE_PLATFORM_WAYLAND_HOST_BACKGROUND_EFFECT_MANAGER_H_
+diff --git a/ui/ozone/platform/wayland/host/background_effect_manager_unittest.cc b/ui/ozone/platform/wayland/host/background_effect_manager_unittest.cc
+new file mode 100644
+index 0000000000..8377fa0154
+--- /dev/null
++++ b/ui/ozone/platform/wayland/host/background_effect_manager_unittest.cc
+@@ -0,0 +1,182 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "ui/ozone/platform/wayland/host/background_effect_manager.h"
++
++#include <ext-background-effect-v1-server-protocol.h>
++
++#include <optional>
++#include <vector>
++
++#include "testing/gmock/include/gmock/gmock.h"
++#include "testing/gtest/include/gtest/gtest.h"
++#include "third_party/skia/include/core/SkRegion.h"
++#include "ui/gfx/geometry/rect.h"
++#include "ui/ozone/platform/wayland/host/wayland_connection.h"
++#include "ui/ozone/platform/wayland/host/wayland_surface.h"
++#include "ui/ozone/platform/wayland/host/wayland_window.h"
++#include "ui/ozone/platform/wayland/test/mock_surface.h"
++#include "ui/ozone/platform/wayland/test/test_background_effect.h"
++#include "ui/ozone/platform/wayland/test/test_wayland_server_thread.h"
++#include "ui/ozone/platform/wayland/test/wayland_test.h"
++
++namespace ui {
++namespace {
++
++SkRegion RegionFromRects(const std::vector<gfx::Rect>& rects) {
++  SkRegion region;
++  for (const auto& rect : rects) {
++    region.op(SkIRect::MakeXYWH(rect.x(), rect.y(), rect.width(),
++                                rect.height()),
++              SkRegion::kUnion_Op);
++  }
++  return region;
++}
++
++class BackgroundEffectManagerTest : public WaylandTestSimple {
++ public:
++  void SetUp() override {
++    WaylandTestSimple::SetUp();
++    surface_id_ = window_->root_surface()->get_surface_id();
++  }
++
++ protected:
++  // Applies the pending state of the root surface and commits it.
++  void ApplyAndCommit() {
++    window_->root_surface()->ApplyPendingState();
++    window_->root_surface()->Commit();
++  }
++
++  // Returns the blur region the server committed for the root surface, or
++  // nullopt if there is no effect object or no region set.
++  std::optional<SkRegion> GetCommittedBlurRegion() {
++    std::optional<SkRegion> result;
++    PostToServerAndWait([&](wl::TestWaylandServerThread* server) {
++      auto* mock_surface = server->GetObject<wl::MockSurface>(surface_id_);
++      ASSERT_TRUE(mock_surface);
++      if (auto* effect = mock_surface->background_effect_surface()) {
++        result = effect->blur_region();
++      }
++    });
++    return result;
++  }
++
++  bool HasEffectObject() {
++    bool has_effect = false;
++    PostToServerAndWait([&](wl::TestWaylandServerThread* server) {
++      auto* mock_surface = server->GetObject<wl::MockSurface>(surface_id_);
++      ASSERT_TRUE(mock_surface);
++      has_effect = !!mock_surface->background_effect_surface();
++    });
++    return has_effect;
++  }
++
++  uint32_t surface_id_ = 0u;
++};
++
++TEST_F(BackgroundEffectManagerTest, BindsAndReceivesCapabilities) {
++  auto* manager = connection_->background_effect_manager();
++  ASSERT_TRUE(manager);
++  EXPECT_TRUE(manager->supports_blur());
++}
++
++// The effect object is only created once a blur region is actually requested,
++// since most surfaces never use it.
++TEST_F(BackgroundEffectManagerTest, EffectObjectCreatedLazily) {
++  ApplyAndCommit();
++  EXPECT_FALSE(HasEffectObject());
++
++  // Clearing a region that was never set must not create the object either.
++  window_->SetBackgroundBlurRegion(std::nullopt);
++  ApplyAndCommit();
++  EXPECT_FALSE(HasEffectObject());
++
++  window_->SetBackgroundBlurRegion(
++      std::vector<gfx::Rect>{gfx::Rect(0, 0, 100, 40)});
++  ApplyAndCommit();
++  EXPECT_TRUE(HasEffectObject());
++}
++
++TEST_F(BackgroundEffectManagerTest, BlurRegionIsDoubleBuffered) {
++  const std::vector<gfx::Rect> region_px = {gfx::Rect(0, 0, 800, 40),
++                                            gfx::Rect(0, 40, 200, 560)};
++  window_->SetBackgroundBlurRegion(region_px);
++
++  // Nothing is sent until the pending state is applied.
++  EXPECT_FALSE(HasEffectObject());
++
++  ApplyAndCommit();
++  auto committed = GetCommittedBlurRegion();
++  ASSERT_TRUE(committed.has_value());
++  EXPECT_EQ(*committed, RegionFromRects(region_px));
++}
++
++TEST_F(BackgroundEffectManagerTest, BlurRegionIsInSurfaceCoordinates) {
++  window_->root_surface()->set_surface_buffer_scale(2);
++  window_->SetBackgroundBlurRegion(
++      std::vector<gfx::Rect>{gfx::Rect(0, 0, 800, 80)});
++  ApplyAndCommit();
++
++  auto committed = GetCommittedBlurRegion();
++  ASSERT_TRUE(committed.has_value());
++  EXPECT_EQ(*committed, RegionFromRects({gfx::Rect(0, 0, 400, 40)}));
++}
++
++TEST_F(BackgroundEffectManagerTest, UnchangedRegionIsNotResent) {
++  const std::vector<gfx::Rect> region_px = {gfx::Rect(0, 0, 800, 40)};
++  window_->SetBackgroundBlurRegion(region_px);
++  ApplyAndCommit();
++  window_->SetBackgroundBlurRegion(region_px);
++  ApplyAndCommit();
++
++  PostToServerAndWait([&](wl::TestWaylandServerThread* server) {
++    auto* mock_surface = server->GetObject<wl::MockSurface>(surface_id_);
++    ASSERT_TRUE(mock_surface);
++    auto* effect = mock_surface->background_effect_surface();
++    ASSERT_TRUE(effect);
++    EXPECT_EQ(effect->set_blur_region_count(), 1);
++  });
++}
++
++TEST_F(BackgroundEffectManagerTest, ClearingRegionRemovesBlur) {
++  window_->SetBackgroundBlurRegion(
++      std::vector<gfx::Rect>{gfx::Rect(0, 0, 800, 40)});
++  ApplyAndCommit();
++  ASSERT_TRUE(GetCommittedBlurRegion().has_value());
++
++  window_->SetBackgroundBlurRegion(std::nullopt);
++  ApplyAndCommit();
++  EXPECT_TRUE(HasEffectObject());
++  EXPECT_FALSE(GetCommittedBlurRegion().has_value());
++}
++
++TEST_F(BackgroundEffectManagerTest, CapabilityChangesNotifyWindows) {
++  auto* manager = connection_->background_effect_manager();
++  ASSERT_TRUE(manager);
++  ASSERT_TRUE(manager->supports_blur());
++
++  EXPECT_CALL(delegate_, OnBackgroundBlurSupportChanged()).Times(1);
++  PostToServerAndWait([](wl::TestWaylandServerThread* server) {
++    server->background_effect_manager()->SendCapabilities(0);
++  });
++  EXPECT_FALSE(manager->supports_blur());
++  ::testing::Mock::VerifyAndClearExpectations(&delegate_);
++
++  // Re-sending the same capabilities is not a change.
++  EXPECT_CALL(delegate_, OnBackgroundBlurSupportChanged()).Times(0);
++  PostToServerAndWait([](wl::TestWaylandServerThread* server) {
++    server->background_effect_manager()->SendCapabilities(0);
++  });
++  ::testing::Mock::VerifyAndClearExpectations(&delegate_);
++
++  EXPECT_CALL(delegate_, OnBackgroundBlurSupportChanged()).Times(1);
++  PostToServerAndWait([](wl::TestWaylandServerThread* server) {
++    server->background_effect_manager()->SendCapabilities(
++        EXT_BACKGROUND_EFFECT_MANAGER_V1_CAPABILITY_BLUR);
++  });
++  EXPECT_TRUE(manager->supports_blur());
++}
++
++}  // namespace
++}  // namespace ui
+diff --git a/ui/ozone/platform/wayland/host/wayland_connection.cc b/ui/ozone/platform/wayland/host/wayland_connection.cc
+index 7e3c92a47b..d237b365bd 100644
+--- a/ui/ozone/platform/wayland/host/wayland_connection.cc
++++ b/ui/ozone/platform/wayland/host/wayland_connection.cc
+@@ -31,6 +31,7 @@
+ #include "ui/gfx/linux/scoped_gbm_device.h"
+ #include "ui/ozone/common/features.h"
+ #include "ui/ozone/platform/wayland/common/wayland_util.h"
++#include "ui/ozone/platform/wayland/host/background_effect_manager.h"
+ #include "ui/ozone/platform/wayland/host/fractional_scale_manager.h"
+ #include "ui/ozone/platform/wayland/host/gtk_primary_selection_device_manager.h"
+ #include "ui/ozone/platform/wayland/host/org_kde_kwin_appmenu.h"
+@@ -152,6 +153,8 @@ WaylandConnection::~WaylandConnection() {
+ bool WaylandConnection::Initialize(bool use_threaded_polling) {
+   // Register factories for classes that implement wl::GlobalObjectRegistrar<T>.
+   // Keep alphabetical order for convenience.
++  RegisterGlobalObjectFactory(BackgroundEffectManager::kInterfaceName,
++                              &BackgroundEffectManager::Instantiate);
+   RegisterGlobalObjectFactory(ExtIdleNotifier::kInterfaceName,
+                               &ExtIdleNotifier::Instantiate);
+   RegisterGlobalObjectFactory(FractionalScaleManager::kInterfaceName,
+diff --git a/ui/ozone/platform/wayland/host/wayland_connection.h b/ui/ozone/platform/wayland/host/wayland_connection.h
+index 3df2c14baf..dd92ea7948 100644
+--- a/ui/ozone/platform/wayland/host/wayland_connection.h
++++ b/ui/ozone/platform/wayland/host/wayland_connection.h
+@@ -40,6 +40,7 @@ struct InputDevice;
+ struct KeyboardDevice;
+ struct TouchscreenDevice;
+ 
++class BackgroundEffectManager;
+ class ExtIdleNotifier;
+ class GtkPrimarySelectionDeviceManager;
+ class OrgKdeKwinAppmenuManager;
+@@ -243,6 +244,10 @@ class WaylandConnection {
+     return overlay_prioritizer_.get();
+   }
+ 
++  BackgroundEffectManager* background_effect_manager() const {
++    return background_effect_manager_.get();
++  }
++
+   SinglePixelBuffer* single_pixel_buffer() const {
+     return single_pixel_buffer_.get();
+   }
+@@ -316,6 +321,7 @@ class WaylandConnection {
+   // makes it possible to avoid exposing setters for all those global objects:
+   // these setters would only be needed by the globals but would be visible to
+   // everyone.
++  friend class BackgroundEffectManager;
+   friend class ExtIdleNotifier;
+   friend class FractionalScaleManager;
+   friend class GtkPrimarySelectionDeviceManager;
+@@ -464,6 +470,7 @@ class WaylandConnection {
+   std::unique_ptr<ExtIdleNotifier> ext_idle_notifier_;
+   std::unique_ptr<OverlayPrioritizer> overlay_prioritizer_;
+   std::unique_ptr<SinglePixelBuffer> single_pixel_buffer_;
++  std::unique_ptr<BackgroundEffectManager> background_effect_manager_;
+ 
+   // Clipboard-related objects. |clipboard_| must be declared after all
+   // DeviceManager instances it depends on, otherwise tests may crash with
+diff --git a/ui/ozone/platform/wayland/host/wayland_surface.cc b/ui/ozone/platform/wayland/host/wayland_surface.cc
+index 0efd9ed752..235b229973 100644
+--- a/ui/ozone/platform/wayland/host/wayland_surface.cc
++++ b/ui/ozone/platform/wayland/host/wayland_surface.cc
+@@ -6,6 +6,7 @@
+ 
+ #include <alpha-compositing-unstable-v1-client-protocol.h>
+ #include <content-type-v1-client-protocol.h>
++#include <ext-background-effect-v1-client-protocol.h>
+ #include <fractional-scale-v1-client-protocol.h>
+ #include <linux-drm-syncobj-v1-client-protocol.h>
+ #include <overlay-prioritizer-client-protocol.h>
+@@ -32,6 +33,7 @@
+ #include "ui/gfx/native_ui_types.h"
+ #include "ui/gfx/overlay_priority_hint.h"
+ #include "ui/ozone/platform/wayland/common/wayland_util.h"
++#include "ui/ozone/platform/wayland/host/background_effect_manager.h"
+ #include "ui/ozone/platform/wayland/host/fractional_scale_manager.h"
+ #include "ui/ozone/platform/wayland/host/overlay_prioritizer.h"
+ #include "ui/ozone/platform/wayland/host/wayland_buffer_handle.h"
+@@ -334,6 +336,23 @@ void WaylandSurface::set_opaque_region(
+   }
+ }
+ 
++void WaylandSurface::set_background_blur_region(
++    std::optional<std::vector<gfx::Rect>> region_px) {
++  pending_state_.background_blur_region_px.clear();
++  if (!root_window_) {
++    return;
++  }
++
++  if (region_px) {
++    pending_state_.background_blur_region_px = std::move(*region_px);
++  }
++
++  if (apply_state_immediately_) {
++    state_.background_blur_region_px = pending_state_.background_blur_region_px;
++    SendBackgroundBlurRegion(state_);
++  }
++}
++
+ void WaylandSurface::set_input_region(
+     std::optional<std::vector<gfx::Rect>> region_px) {
+   pending_state_.input_region_px.clear();
+@@ -400,6 +419,42 @@ wl::Object<wl_region> WaylandSurface::CreateAndAddRegion(
+   return region;
+ }
+ 
++bool WaylandSurface::SendBackgroundBlurRegion(const State& state) {
++  if (!background_effect_) {
++    // Nothing to remove if the effect object was never created.
++    if (state.background_blur_region_px.empty()) {
++      return false;
++    }
++    auto* manager = connection_->background_effect_manager();
++    if (!manager) {
++      return false;
++    }
++    background_effect_ = manager->CreateBackgroundEffectSurface(surface());
++    if (!background_effect_) {
++      LOG(ERROR) << "Failed to create ext_background_effect_surface_v1";
++      return false;
++    }
++  }
++
++  wl::Object<wl_region> region;
++  if (!state.background_blur_region_px.empty()) {
++    // Unlike for the opaque region, round outwards: blurring a fraction of a
++    // pixel too much is harmless, but rounding inwards drops the thin rects
++    // that callers use to approximate rounded corners.
++    region.reset(wl_compositor_create_region(connection_->compositor()));
++    const float scale = GetWaylandScale(state);
++    for (const auto& rect_px : state.background_blur_region_px) {
++      const gfx::Rect rect =
++          gfx::ScaleToEnclosingRect(rect_px, 1.f / scale);
++      wl_region_add(region.get(), rect.x(), rect.y(), rect.width(),
++                    rect.height());
++    }
++  }
++  ext_background_effect_surface_v1_set_blur_region(background_effect_.get(),
++                                                   region.get());
++  return true;
++}
++
+ void WaylandSurface::EnsureSurfaceSync() {
+   if (!surface_sync_) {
+     surface_sync_.reset(wp_linux_drm_syncobj_manager_v1_get_surface(
+@@ -615,6 +670,15 @@ std::optional<bool> WaylandSurface::ApplyPendingState() {
+     needs_commit = true;
+   }
+ 
++  // The blur region is in surface-local coordinates, so it has to be resent
++  // when the scale changes, just like the opaque region.
++  if (pending_state_.background_blur_region_px !=
++          state_.background_blur_region_px ||
++      (!pending_state_.background_blur_region_px.empty() &&
++       GetWaylandScale(pending_state_) != GetWaylandScale(state_))) {
++    needs_commit |= SendBackgroundBlurRegion(pending_state_);
++  }
++
+   if (content_type_ &&
+       (pending_state_.contains_video != state_.contains_video)) {
+     wp_content_type_v1_set_content_type(content_type_.get(),
+@@ -823,6 +887,7 @@ WaylandSurface::State& WaylandSurface::State::operator=(
+   damage_px = other.damage_px;
+   opaque_region_px = other.opaque_region_px;
+   input_region_px = other.input_region_px;
++  background_blur_region_px = other.background_blur_region_px;
+   color_space = other.color_space;
+   hdr_metadata = other.hdr_metadata;
+   buffer_id = other.buffer_id;
+diff --git a/ui/ozone/platform/wayland/host/wayland_surface.h b/ui/ozone/platform/wayland/host/wayland_surface.h
+index 3c49265ef2..ad508296b1 100644
+--- a/ui/ozone/platform/wayland/host/wayland_surface.h
++++ b/ui/ozone/platform/wayland/host/wayland_surface.h
+@@ -127,6 +127,15 @@ class WaylandSurface {
+   // reset to empty.
+   void set_opaque_region(std::optional<std::vector<gfx::Rect>> region_px);
+ 
++  // Sets the region of this surface behind which the compositor should blur
++  // the background, using ext_background_effect_surface_v1. Rects in
++  // |region_px| are specified surface-local, in physical pixels. If
++  // |region_px| is nullopt or empty, the blur is removed. This has no effect
++  // if the compositor does not support the protocol, and the blur is only
++  // visible where the surface's content is translucent.
++  void set_background_blur_region(
++      std::optional<std::vector<gfx::Rect>> region_px);
++
+   // Sets the input region on this surface in physical pixels.
+   // The input region indicates which parts of the surface accept pointer and
+   // touch input events. This is expected to be called from ToplevelWindow
+@@ -259,6 +268,7 @@ class WaylandSurface {
+     std::vector<gfx::Rect> damage_px;
+     std::vector<gfx::Rect> opaque_region_px;
+     std::vector<gfx::Rect> input_region_px;
++    std::vector<gfx::Rect> background_blur_region_px;
+ 
+     // The current color space and HDR metadata of the surface.
+     gfx::ColorSpace color_space;
+@@ -344,6 +354,11 @@ class WaylandSurface {
+       const std::vector<gfx::Rect>& region_px,
+       float buffer_scale);
+ 
++  // Sends |state|'s background blur region to the compositor, creating the
++  // ext_background_effect_surface_v1 object first if needed. Returns true if
++  // a request was sent, i.e. the surface needs a commit.
++  bool SendBackgroundBlurRegion(const State& state);
++
+   // wl_surface states that are stored in Wayland client. It moves to |state_|
+   // on ApplyPendingState().
+   State pending_state_;
+@@ -362,6 +377,9 @@ class WaylandSurface {
+   std::unique_ptr<WaylandSyncobjAcquireTimeline> acquire_timeline_;
+   wl::Object<overlay_prioritized_surface> overlay_priority_surface_;
+   wl::Object<wp_content_type_v1> content_type_;
++  // Created lazily, the first time a non-empty blur region is set, since the
++  // protocol allows only one effect object per wl_surface for its lifetime.
++  wl::Object<ext_background_effect_surface_v1> background_effect_;
+   wl::Object<wp_fractional_scale_v1> fractional_scale_;
+   std::unique_ptr<WaylandWpColorManagementSurface> wp_color_management_surface_;
+   ExplicitReleaseCallback next_explicit_release_request_;
+diff --git a/ui/ozone/platform/wayland/host/wayland_window.cc b/ui/ozone/platform/wayland/host/wayland_window.cc
+index 010e823ac1..89951efc02 100644
+--- a/ui/ozone/platform/wayland/host/wayland_window.cc
++++ b/ui/ozone/platform/wayland/host/wayland_window.cc
+@@ -178,6 +178,15 @@ void WaylandWindow::UpdateWindowScale(bool update_bounds) {
+   }
+ }
+ 
++void WaylandWindow::SetBackgroundBlurRegion(
++    std::optional<std::vector<gfx::Rect>> region_px) {
++  root_surface()->set_background_blur_region(std::move(region_px));
++}
++
++void WaylandWindow::OnBackgroundBlurSupportChanged() {
++  delegate_->OnBackgroundBlurSupportChanged();
++}
++
+ void WaylandWindow::OnEnteredOutputScaleChanged() {
+   // Display scale changes should not lead to surface scale updates unless
+   // either per-surface scaling is disabled or wp-fractional-scale-v1 protocol
+diff --git a/ui/ozone/platform/wayland/host/wayland_window.h b/ui/ozone/platform/wayland/host/wayland_window.h
+index e0e6bb8d52..71782a8070 100644
+--- a/ui/ozone/platform/wayland/host/wayland_window.h
++++ b/ui/ozone/platform/wayland/host/wayland_window.h
+@@ -151,6 +151,10 @@ class WaylandWindow : public PlatformWindow,
+   bool HasPointerFocus() const;
+   bool HasKeyboardFocus() const;
+ 
++  // Called when the compositor grants or revokes the background blur
++  // capability, see BackgroundEffectManager.
++  void OnBackgroundBlurSupportChanged();
++
+   // The methods set or return whether this window has touch focus and should
+   // dispatch touch events.
+   void set_touch_focus(bool focus) { has_touch_focus_ = focus; }
+@@ -240,6 +244,8 @@ class WaylandWindow : public PlatformWindow,
+                       const gfx::ImageSkia& app_icon) override;
+   void SizeConstraintsChanged() override;
+   bool ShouldUpdateWindowShape() const override;
++  void SetBackgroundBlurRegion(
++      std::optional<std::vector<gfx::Rect>> region_px) override;
+ 
+   // PlatformEventDispatcher
+   bool CanDispatchEvent(const PlatformEvent& event) override;
+diff --git a/ui/ozone/platform/wayland/ozone_platform_wayland.cc b/ui/ozone/platform/wayland/ozone_platform_wayland.cc
+index 39b1aa814c..368defc04a 100644
+--- a/ui/ozone/platform/wayland/ozone_platform_wayland.cc
++++ b/ui/ozone/platform/wayland/ozone_platform_wayland.cc
+@@ -40,6 +40,7 @@
+ #include "ui/ozone/platform/wayland/gpu/wayland_gl_egl_utility.h"
+ #include "ui/ozone/platform/wayland/gpu/wayland_overlay_manager.h"
+ #include "ui/ozone/platform/wayland/gpu/wayland_surface_factory.h"
++#include "ui/ozone/platform/wayland/host/background_effect_manager.h"
+ #include "ui/ozone/platform/wayland/host/drm_syncobj_ioctl_wrapper.h"
+ #include "ui/ozone/platform/wayland/host/linux_ui_delegate_wayland.h"
+ #include "ui/ozone/platform/wayland/host/wayland_buffer_manager_connector.h"
+@@ -436,6 +437,10 @@ class OzonePlatformWayland : public OzonePlatform,
+ 
+       properties.supports_global_application_menus =
+           connection_->org_kde_kwin_appmenu_manager() != nullptr;
++
++      properties.supports_background_blur =
++          connection_->background_effect_manager() &&
++          connection_->background_effect_manager()->supports_blur();
+     } else if (buffer_manager_) {
+       DCHECK(has_initialized_gpu());
+       // These properties are set when the GetPlatformRuntimeProperties is
+diff --git a/ui/ozone/platform/wayland/test/mock_surface.cc b/ui/ozone/platform/wayland/test/mock_surface.cc
+index 803a28f5e7..440ba4e5d6 100644
+--- a/ui/ozone/platform/wayland/test/mock_surface.cc
++++ b/ui/ozone/platform/wayland/test/mock_surface.cc
+@@ -5,6 +5,7 @@
+ #include "ui/ozone/platform/wayland/test/mock_surface.h"
+ 
+ #include "base/notreached.h"
++#include "ui/ozone/platform/wayland/test/test_background_effect.h"
+ #include "ui/ozone/platform/wayland/test/test_region.h"
+ #include "ui/ozone/platform/wayland/test/test_wayland_server_thread.h"
+ 
+@@ -55,7 +56,12 @@ void Frame(struct wl_client* client,
+ }
+ 
+ void Commit(wl_client* client, wl_resource* resource) {
+-  GetUserDataAs<MockSurface>(resource)->Commit();
++  auto* mock_surface = GetUserDataAs<MockSurface>(resource);
++  // Double-buffered state of surface extensions takes effect on commit.
++  if (auto* background_effect = mock_surface->background_effect_surface()) {
++    background_effect->Commit();
++  }
++  mock_surface->Commit();
+ }
+ 
+ void SetBufferScale(wl_client* client, wl_resource* resource, int32_t scale) {
+diff --git a/ui/ozone/platform/wayland/test/mock_surface.h b/ui/ozone/platform/wayland/test/mock_surface.h
+index d150f04c53..1e14afac02 100644
+--- a/ui/ozone/platform/wayland/test/mock_surface.h
++++ b/ui/ozone/platform/wayland/test/mock_surface.h
+@@ -30,6 +30,7 @@ extern const struct zwp_linux_surface_synchronization_v1_interface
+     kMockZwpLinuxSurfaceSynchronizationImpl;
+ 
+ class MockLinuxDrmSyncobjSurface;
++class TestBackgroundEffectSurface;
+ 
+ // Manage client surface
+ class MockSurface : public ServerObject {
+@@ -89,6 +90,13 @@ class MockSurface : public ServerObject {
+     return linux_drm_syncobj_surface_;
+   }
+ 
++  void set_background_effect_surface(TestBackgroundEffectSurface* effect) {
++    background_effect_surface_ = effect;
++  }
++  TestBackgroundEffectSurface* background_effect_surface() {
++    return background_effect_surface_;
++  }
++
+   void set_blending(TestAlphaBlending* blending) { blending_ = blending; }
+   TestAlphaBlending* blending() { return blending_; }
+ 
+@@ -132,6 +140,7 @@ class MockSurface : public ServerObject {
+   raw_ptr<TestAlphaBlending> blending_ = nullptr;
+   raw_ptr<TestOverlayPrioritizedSurface> prioritized_surface_ = nullptr;
+   raw_ptr<MockLinuxDrmSyncobjSurface> linux_drm_syncobj_surface_ = nullptr;
++  raw_ptr<TestBackgroundEffectSurface> background_effect_surface_ = nullptr;
+   gfx::Rect opaque_region_ = {-1, -1, 0, 0};
+   gfx::Rect input_region_ = {-1, -1, 0, 0};
+ 
+diff --git a/ui/ozone/platform/wayland/test/test_background_effect.cc b/ui/ozone/platform/wayland/test/test_background_effect.cc
+new file mode 100644
+index 0000000000..30bfe3a884
+--- /dev/null
++++ b/ui/ozone/platform/wayland/test/test_background_effect.cc
+@@ -0,0 +1,104 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "ui/ozone/platform/wayland/test/test_background_effect.h"
++
++#include "base/check.h"
++#include "base/functional/bind.h"
++#include "ui/ozone/platform/wayland/test/mock_surface.h"
++#include "ui/ozone/platform/wayland/test/server_object.h"
++#include "ui/ozone/platform/wayland/test/test_region.h"
++
++namespace wl {
++
++namespace {
++
++constexpr uint32_t kBackgroundEffectProtocolVersion = 1;
++
++void SetBlurRegion(wl_client* client,
++                   wl_resource* resource,
++                   wl_resource* region) {
++  auto* effect = GetUserDataAs<TestBackgroundEffectSurface>(resource);
++  effect->increment_set_blur_region_count();
++  if (!region) {
++    effect->set_pending_blur_region(std::nullopt);
++    return;
++  }
++  effect->set_pending_blur_region(*GetUserDataAs<TestRegion>(region));
++}
++
++void GetBackgroundEffect(wl_client* client,
++                         wl_resource* resource,
++                         uint32_t id,
++                         wl_resource* surface) {
++  auto* mock_surface = GetUserDataAs<MockSurface>(surface);
++  if (mock_surface->background_effect_surface()) {
++    wl_resource_post_error(
++        resource,
++        EXT_BACKGROUND_EFFECT_MANAGER_V1_ERROR_BACKGROUND_EFFECT_EXISTS,
++        "background effect exists");
++    return;
++  }
++  wl_resource* effect_resource =
++      CreateResourceWithImpl<TestBackgroundEffectSurface>(
++          client, &ext_background_effect_surface_v1_interface,
++          wl_resource_get_version(resource), &kTestBackgroundEffectSurfaceImpl,
++          id,
++          base::BindOnce(&MockSurface::set_background_effect_surface,
++                         mock_surface->GetWeakPtr(), nullptr));
++  CHECK(effect_resource);
++  mock_surface->set_background_effect_surface(
++      GetUserDataAs<TestBackgroundEffectSurface>(effect_resource));
++}
++
++const struct ext_background_effect_manager_v1_interface
++    kTestBackgroundEffectManagerImpl = {
++        .destroy = DestroyResource,
++        .get_background_effect = GetBackgroundEffect,
++};
++
++}  // namespace
++
++const struct ext_background_effect_surface_v1_interface
++    kTestBackgroundEffectSurfaceImpl = {
++        .destroy = DestroyResource,
++        .set_blur_region = SetBlurRegion,
++};
++
++TestBackgroundEffectSurface::TestBackgroundEffectSurface(wl_resource* resource)
++    : ServerObject(resource) {}
++
++// The MockSurface's pointer to this object is reset by the destroy callback
++// passed to CreateResourceWithImpl(), which also works if the wl_surface is
++// destroyed first, e.g. when the client disconnects.
++TestBackgroundEffectSurface::~TestBackgroundEffectSurface() = default;
++
++void TestBackgroundEffectSurface::Commit() {
++  if (!has_pending_blur_region_) {
++    return;
++  }
++  blur_region_ = std::move(pending_blur_region_);
++  pending_blur_region_.reset();
++  has_pending_blur_region_ = false;
++}
++
++TestBackgroundEffectManager::TestBackgroundEffectManager()
++    : GlobalObject(&ext_background_effect_manager_v1_interface,
++                   &kTestBackgroundEffectManagerImpl,
++                   kBackgroundEffectProtocolVersion) {}
++
++TestBackgroundEffectManager::~TestBackgroundEffectManager() = default;
++
++void TestBackgroundEffectManager::SendCapabilities(uint32_t flags) {
++  capabilities_ = flags;
++  if (resource()) {
++    ext_background_effect_manager_v1_send_capabilities(resource(), flags);
++  }
++}
++
++void TestBackgroundEffectManager::OnBind() {
++  ext_background_effect_manager_v1_send_capabilities(resource(), capabilities_);
++}
++
++}  // namespace wl
+diff --git a/ui/ozone/platform/wayland/test/test_background_effect.h b/ui/ozone/platform/wayland/test/test_background_effect.h
+new file mode 100644
+index 0000000000..a3d581eeea
+--- /dev/null
++++ b/ui/ozone/platform/wayland/test/test_background_effect.h
+@@ -0,0 +1,77 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef UI_OZONE_PLATFORM_WAYLAND_TEST_TEST_BACKGROUND_EFFECT_H_
++#define UI_OZONE_PLATFORM_WAYLAND_TEST_TEST_BACKGROUND_EFFECT_H_
++
++#include <ext-background-effect-v1-server-protocol.h>
++
++#include <cstdint>
++#include <optional>
++
++#include "third_party/skia/include/core/SkRegion.h"
++#include "ui/ozone/platform/wayland/test/global_object.h"
++#include "ui/ozone/platform/wayland/test/server_object.h"
++
++struct wl_resource;
++
++namespace wl {
++
++extern const struct ext_background_effect_surface_v1_interface
++    kTestBackgroundEffectSurfaceImpl;
++
++// Server-side ext_background_effect_surface_v1. Like the real protocol, the
++// blur region is double-buffered and only becomes current on
++// wl_surface.commit, which MockSurface forwards via `Commit()`.
++class TestBackgroundEffectSurface : public ServerObject {
++ public:
++  explicit TestBackgroundEffectSurface(wl_resource* resource);
++  TestBackgroundEffectSurface(const TestBackgroundEffectSurface&) = delete;
++  TestBackgroundEffectSurface& operator=(const TestBackgroundEffectSurface&) =
++      delete;
++  ~TestBackgroundEffectSurface() override;
++
++  void set_pending_blur_region(std::optional<SkRegion> region) {
++    pending_blur_region_ = std::move(region);
++    has_pending_blur_region_ = true;
++  }
++
++  void Commit();
++
++  // The committed blur region, or nullopt if no region is set (no effect).
++  const std::optional<SkRegion>& blur_region() const { return blur_region_; }
++
++  // Number of set_blur_region requests received so far.
++  int set_blur_region_count() const { return set_blur_region_count_; }
++  void increment_set_blur_region_count() { ++set_blur_region_count_; }
++
++ private:
++  bool has_pending_blur_region_ = false;
++  std::optional<SkRegion> pending_blur_region_;
++  std::optional<SkRegion> blur_region_;
++  int set_blur_region_count_ = 0;
++};
++
++// Server-side ext_background_effect_manager_v1 global.
++class TestBackgroundEffectManager : public GlobalObject {
++ public:
++  TestBackgroundEffectManager();
++  TestBackgroundEffectManager(const TestBackgroundEffectManager&) = delete;
++  TestBackgroundEffectManager& operator=(const TestBackgroundEffectManager&) =
++      delete;
++  ~TestBackgroundEffectManager() override;
++
++  // Sends the capabilities event to the bound client.
++  void SendCapabilities(uint32_t flags);
++
++  // GlobalObject:
++  void OnBind() override;
++
++ private:
++  uint32_t capabilities_ = EXT_BACKGROUND_EFFECT_MANAGER_V1_CAPABILITY_BLUR;
++};
++
++}  // namespace wl
++
++#endif  // UI_OZONE_PLATFORM_WAYLAND_TEST_TEST_BACKGROUND_EFFECT_H_
+diff --git a/ui/ozone/platform/wayland/test/test_wayland_server_thread.cc b/ui/ozone/platform/wayland/test/test_wayland_server_thread.cc
+index bf63c21ecb..c77d3a8f5b 100644
+--- a/ui/ozone/platform/wayland/test/test_wayland_server_thread.cc
++++ b/ui/ozone/platform/wayland/test/test_wayland_server_thread.cc
+@@ -158,6 +158,10 @@ bool TestWaylandServerThread::Start() {
+   if (!xdg_toplevel_icon_manager_v1_.Initialize(display_.get())) {
+     return false;
+   }
++  // Keep new globals last: some tests depend on the names of existing ones.
++  if (!background_effect_manager_.Initialize(display_.get())) {
++    return false;
++  }
+ 
+   client_ = wl_client_create(display_.get(), server_fd.release());
+   if (!client_)
+diff --git a/ui/ozone/platform/wayland/test/test_wayland_server_thread.h b/ui/ozone/platform/wayland/test/test_wayland_server_thread.h
+index ffb45991b6..8ff975e4f2 100644
+--- a/ui/ozone/platform/wayland/test/test_wayland_server_thread.h
++++ b/ui/ozone/platform/wayland/test/test_wayland_server_thread.h
+@@ -24,6 +24,7 @@
+ #include "ui/ozone/platform/wayland/test/mock_xdg_toplevel_icon.h"
+ #include "ui/ozone/platform/wayland/test/mock_zwp_linux_dmabuf.h"
+ #include "ui/ozone/platform/wayland/test/test_alpha_compositing.h"
++#include "ui/ozone/platform/wayland/test/test_background_effect.h"
+ #include "ui/ozone/platform/wayland/test/test_compositor.h"
+ #include "ui/ozone/platform/wayland/test/test_data_device_manager.h"
+ #include "ui/ozone/platform/wayland/test/test_fractional_scale.h"
+@@ -127,6 +128,9 @@ class TestWaylandServerThread : public base::Thread,
+     return output_ptr;
+   }
+ 
++  TestBackgroundEffectManager* background_effect_manager() {
++    return &background_effect_manager_;
++  }
+   TestDataDeviceManager* data_device_manager() { return &data_device_manager_; }
+   TestSeat* seat() { return &seat_; }
+   MockXdgShell* xdg_shell() { return &xdg_shell_; }
+@@ -206,6 +210,7 @@ class TestWaylandServerThread : public base::Thread,
+   TestViewporter viewporter_;
+   TestFractionalScaleManager fractional_scale_manager_;
+   TestAlphaCompositing alpha_compositing_;
++  TestBackgroundEffectManager background_effect_manager_;
+   TestDataDeviceManager data_device_manager_;
+   TestOutput output_;
+   TestOverlayPrioritizer overlay_prioritizer_;
+diff --git a/ui/ozone/public/ozone_platform.h b/ui/ozone/public/ozone_platform.h
+index 4537244c51..358c86fcfa 100644
+--- a/ui/ozone/public/ozone_platform.h
++++ b/ui/ozone/public/ozone_platform.h
+@@ -221,6 +221,12 @@ class COMPONENT_EXPORT(OZONE) OzonePlatform {
+     // Linux only, but see a TODO in BrowserDesktopWindowTreeHostLinux.
+     // Determines whether the platform supports the global application menu.
+     bool supports_global_application_menus = false;
++
++    // Wayland only: whether the compositor currently blurs the background
++    // behind translucent windows, see PlatformWindow::SetBackgroundBlurRegion.
++    // This can change at runtime; windows are notified through
++    // PlatformWindowDelegate::OnBackgroundBlurSupportChanged().
++    bool supports_background_blur = false;
+   };
+ 
+   // Corresponds to chrome_browser_main_extra_parts.h.
+diff --git a/ui/ozone/test/mock_platform_window_delegate.h b/ui/ozone/test/mock_platform_window_delegate.h
+index 220e24fed9..0813275514 100644
+--- a/ui/ozone/test/mock_platform_window_delegate.h
++++ b/ui/ozone/test/mock_platform_window_delegate.h
+@@ -46,6 +46,7 @@ class MockPlatformWindowDelegate : public PlatformWindowDelegate {
+   MOCK_METHOD0(OnAcceleratedWidgetDestroyed, void());
+   MOCK_METHOD1(OnActivationChanged, void(bool active));
+   MOCK_METHOD1(OnPaintAsActiveChanged, void(bool paint_as_active));
++  MOCK_METHOD0(OnBackgroundBlurSupportChanged, void());
+   MOCK_CONST_METHOD0(GetMinimumSizeForWindow, std::optional<gfx::Size>());
+   MOCK_CONST_METHOD0(GetMaximumSizeForWindow, std::optional<gfx::Size>());
+   MOCK_METHOD0(GetOwnedWindowAnchorAndRectInDIP,
+diff --git a/ui/platform_window/platform_window.cc b/ui/platform_window/platform_window.cc
+index 8b5964d3c9..d01faae36e 100644
+--- a/ui/platform_window/platform_window.cc
++++ b/ui/platform_window/platform_window.cc
+@@ -70,6 +70,9 @@ void PlatformWindow::SetOpaqueRegion(
+ void PlatformWindow::SetInputRegion(
+     std::optional<std::vector<gfx::Rect>> region_px) {}
+ 
++void PlatformWindow::SetBackgroundBlurRegion(
++    std::optional<std::vector<gfx::Rect>> region_px) {}
++
+ bool PlatformWindow::IsClientControlledWindowMovementSupported() const {
+   return true;
+ }
+diff --git a/ui/platform_window/platform_window.h b/ui/platform_window/platform_window.h
+index e9eb27e497..4eb48ecfb4 100644
+--- a/ui/platform_window/platform_window.h
++++ b/ui/platform_window/platform_window.h
+@@ -194,6 +194,15 @@ class COMPONENT_EXPORT(PLATFORM_WINDOW) PlatformWindow
+   // existing region will be reset.
+   virtual void SetInputRegion(std::optional<std::vector<gfx::Rect>> region_px);
+ 
++  // Asks the window system to blur the content behind |region_px|, which is
++  // window-local and in physical pixels. The blur only shows through where
++  // the window's own content is translucent, so the region should not overlap
++  // the opaque region. If |region_px| is nullopt or empty, any existing blur
++  // region is removed. Whether the window system supports this is reported by
++  // OzonePlatform::PlatformRuntimeProperties::supports_background_blur.
++  virtual void SetBackgroundBlurRegion(
++      std::optional<std::vector<gfx::Rect>> region_px);
++
+   // Whether the platform supports client-controlled window movement. Under
+   // Wayland, for example, this returns false, unless the required protocol
+   // extension is supported by the compositor.
+diff --git a/ui/platform_window/platform_window_delegate.h b/ui/platform_window/platform_window_delegate.h
+index 2ba67bf9f9..40bd794a00 100644
+--- a/ui/platform_window/platform_window_delegate.h
++++ b/ui/platform_window/platform_window_delegate.h
+@@ -180,6 +180,10 @@ class COMPONENT_EXPORT(PLATFORM_WINDOW) PlatformWindowDelegate {
+   // OnActivationChanged and leave this as a no-op.
+   virtual void OnPaintAsActiveChanged(bool paint_as_active) {}
+ 
++  // Notifies the delegate that the window system started or stopped
++  // supporting background blur, see PlatformWindow::SetBackgroundBlurRegion().
++  virtual void OnBackgroundBlurSupportChanged() {}
++
+   // Requests size constraints for the PlatformWindow in DIP.
+   virtual std::optional<gfx::Size> GetMinimumSizeForWindow() const;
+   virtual std::optional<gfx::Size> GetMaximumSizeForWindow() const;
+-- 
+2.43.0
+

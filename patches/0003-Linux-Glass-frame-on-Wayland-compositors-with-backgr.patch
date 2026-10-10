@@ -1,0 +1,1651 @@
+From 5e73a12ab7db6616cc08e7728cfd2b3ebac7779b Mon Sep 17 00:00:00 2001
+From: Ben Joldersma <bennidhamma@gmail.com>
+Date: Sat, 10 Oct 2026 16:14:22 -0700
+Subject: [PATCH 3/5] [Linux] Glass frame on Wayland compositors with
+ background blur
+
+Enable the cross-platform Glass Frame (GlassFrameService,
+FrameStyle::kGlass) on Linux, with the compositor providing the blur
+through ext-background-effect-v1 instead of NSGlassEffectView:
+
+- features::IsGlassFrameEnabled() covers Linux; GlassFrameService is
+  created there and only makes windows eligible while the platform
+  reports background blur support. The Intel-Mac x86 default-off no
+  longer applies to Linux. Flag, pref, settings toggle and the
+  interactive tests are enabled on Linux.
+- BrowserFrameViewLinux paints a translucent frame-colored tint over
+  the glass area, reports it via GetGlassFrameRegion(), and keeps it in
+  sync with layout, the vertical tab strip and the top container.
+  BrowserDesktopWindowTreeHostLinux removes it from the opaque region
+  and sends it, clipped to the rounded window shape, as the blur
+  region.
+- On Linux the whole top chrome is glass: the toolbar, bookmarks bar,
+  active tab and tab strip buttons become translucent
+  (GlassFrameToolbarOpacity), menus of glass windows are translucent
+  (GlassFrameMenuOpacity), and chrome:// pages are see-through with
+  semi-opaque cards (GlassFrameTransparentWebUI). An opt-in param makes
+  all pages see-through (GlassFrameTransparentWebContents).
+- GlassFrameService::GetTintOpacity() is shared with macOS.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ chrome/browser/about_flags.cc                 |   2 +-
+ .../api/settings_private/prefs_util.cc        |   2 +
+ chrome/browser/global_features.cc             |   2 +-
+ chrome/browser/prefs/browser_prefs.cc         |  10 +-
+ chrome/browser/ui/color/BUILD.gn              |   1 +
+ chrome/browser/ui/color/chrome_color_mixer.cc |  36 +++
+ chrome/browser/ui/color/chrome_color_mixer.h  |   6 +
+ .../browser/ui/color/chrome_color_mixers.cc   |   3 +
+ .../color/material_tab_strip_color_mixer.cc   |  21 +-
+ chrome/browser/ui/tabs/tab_style.cc           |  13 +-
+ chrome/browser/ui/views/frame/BUILD.gn        |  15 ++
+ .../browser_desktop_window_tree_host_linux.cc |  36 ++-
+ .../browser_desktop_window_tree_host_linux.h  |   1 +
+ .../ui/views/frame/browser_frame_view.cc      |   4 +
+ .../ui/views/frame/browser_frame_view.h       |   9 +
+ .../views/frame/browser_frame_view_linux.cc   | 239 +++++++++++++++++-
+ .../ui/views/frame/browser_frame_view_linux.h |  47 +++-
+ .../frame/browser_frame_view_linux_native.cc  |   6 +
+ .../frame/browser_native_widget_aura_linux.cc |   6 +
+ .../frame/browser_native_widget_aura_linux.h  |   4 +
+ .../views/frame/browser_native_widget_mac.mm  |  26 +-
+ .../ui/views/frame/contents_web_view.cc       |  52 +++-
+ .../ui/views/frame/contents_web_view.h        |   7 +
+ .../ui/views/frame/glass_frame_service.cc     |  88 ++++++-
+ .../ui/views/frame/glass_frame_service.h      |  20 ++
+ .../glass_frame_service_interactive_uitest.cc |   8 +-
+ .../layout/browser_view_tabbed_layout_impl.cc |  29 +++
+ .../layout/browser_view_tabbed_layout_impl.h  |   4 +
+ .../views/frame/opaque_browser_frame_view.h   |   2 +-
+ .../ui/views/frame/themed_background.cc       |  10 +
+ .../ui/views/frame/themed_background.h        |   8 +
+ .../tabs/common/horizontal_tab_style_views.cc |  17 +-
+ ui/base/ui_base_features.cc                   |  34 +++
+ ui/base/ui_base_features.h                    |  15 ++
+ 34 files changed, 737 insertions(+), 46 deletions(-)
+
+diff --git a/chrome/browser/about_flags.cc b/chrome/browser/about_flags.cc
+index fbf4261d9a..4a28aa1103 100644
+--- a/chrome/browser/about_flags.cc
++++ b/chrome/browser/about_flags.cc
+@@ -9778,7 +9778,7 @@ const FeatureEntry kFeatureEntries[] = {
+      FEATURE_VALUE_TYPE(features::kGeic)},
+ 
+     {"glass-frame", flag_descriptions::kGlassFrameName,
+-     flag_descriptions::kGlassFrameDescription, kOsMac,
++     flag_descriptions::kGlassFrameDescription, kOsMac | kOsLinux,
+      FEATURE_VALUE_TYPE(features::kGlassFrame)},
+ 
+     {"desktop-glow-up", flag_descriptions::kDesktopGlowUpName,
+diff --git a/chrome/browser/extensions/api/settings_private/prefs_util.cc b/chrome/browser/extensions/api/settings_private/prefs_util.cc
+index 81e238dd87..514fb22f09 100644
+--- a/chrome/browser/extensions/api/settings_private/prefs_util.cc
++++ b/chrome/browser/extensions/api/settings_private/prefs_util.cc
+@@ -348,6 +348,8 @@ const PrefsUtil::TypedPrefMap& PrefsUtil::GetAllowlistedKeys() {
+       settings_api::PrefType::kBoolean;
+   (*s_allowlist)[::prefs::kConfirmToQuitEnabled] =
+       settings_api::PrefType::kBoolean;
++#endif
++#if BUILDFLAG(IS_MAC) || BUILDFLAG(IS_LINUX)
+   (*s_allowlist)[::prefs::kGlassFrameEnabled] =
+       settings_api::PrefType::kBoolean;
+ #endif
+diff --git a/chrome/browser/global_features.cc b/chrome/browser/global_features.cc
+index 227504a6d2..273ed90785 100644
+--- a/chrome/browser/global_features.cc
++++ b/chrome/browser/global_features.cc
+@@ -286,7 +286,7 @@ void GlobalFeatures::PreMainMessageLoopRun() {
+   }
+ #endif
+ 
+-#if BUILDFLAG(IS_MAC)
++#if BUILDFLAG(IS_MAC) || BUILDFLAG(IS_LINUX)
+   if (features::IsGlassFrameEnabled()) {
+     glass_frame_service_ =
+         GetUserDataFactory().CreateInstance<GlassFrameService>(
+diff --git a/chrome/browser/prefs/browser_prefs.cc b/chrome/browser/prefs/browser_prefs.cc
+index 2eb244c5a3..0fc6310900 100644
+--- a/chrome/browser/prefs/browser_prefs.cc
++++ b/chrome/browser/prefs/browser_prefs.cc
+@@ -519,10 +519,13 @@
+ #include "chrome/browser/media/webrtc/system_media_capture_permissions_stats_mac.h"
+ #include "chrome/browser/ui/cocoa/apps/quit_with_apps_controller_mac.h"
+ #include "chrome/browser/ui/cocoa/confirm_quit.h"
+-#include "chrome/browser/ui/views/frame/glass_frame_service.h"
+ #include "chrome/browser/web_applications/os_integration/mac/app_shim_registry.h"
+ #endif
+ 
++#if BUILDFLAG(IS_MAC) || BUILDFLAG(IS_LINUX)
++#include "chrome/browser/ui/views/frame/glass_frame_service.h"
++#endif
++
+ #if BUILDFLAG(IS_WIN)
+ #include "chrome/browser/font_prewarmer_tab_helper.h"
+ #include "chrome/browser/media/cdm_pref_service_helper.h"
+@@ -1858,7 +1861,6 @@ void RegisterLocalState(PrefRegistrySimple* registry) {
+   QuitWithAppsController::RegisterPrefs(registry);
+   system_media_permissions::RegisterSystemMediaPermissionStatesPrefs(registry);
+   AppShimRegistry::Get()->RegisterLocalPrefs(registry);
+-  GlassFrameService::RegisterLocalStatePrefs(registry);
+ 
+   // The default value is not signicant as this preference is only consulted if
+   // it is explicitly set by an enterprise policy.
+@@ -1867,6 +1869,10 @@ void RegisterLocalState(PrefRegistrySimple* registry) {
+   registry->RegisterBooleanPref(prefs::kUpdateOnZeroWindowEnabled, true);
+ #endif
+ 
++#if BUILDFLAG(IS_MAC) || BUILDFLAG(IS_LINUX)
++  GlassFrameService::RegisterLocalStatePrefs(registry);
++#endif
++
+ #if BUILDFLAG(IS_WIN)
+   os_crypt_async::RegisterLocalPrefs(registry);
+   registry->RegisterBooleanPref(prefs::kRendererAppContainerEnabled, true);
+diff --git a/chrome/browser/ui/color/BUILD.gn b/chrome/browser/ui/color/BUILD.gn
+index ac64634700..c6c1c1698d 100644
+--- a/chrome/browser/ui/color/BUILD.gn
++++ b/chrome/browser/ui/color/BUILD.gn
+@@ -61,6 +61,7 @@ source_set("mixers") {
+     "//components/omnibox/common",
+     "//components/search",
+     "//ui/base:buildflags",
++    "//ui/base:features",
+     "//ui/color",
+     "//ui/color:mixers",
+   ]
+diff --git a/chrome/browser/ui/color/chrome_color_mixer.cc b/chrome/browser/ui/color/chrome_color_mixer.cc
+index 91571ae785..d08d1a6e15 100644
+--- a/chrome/browser/ui/color/chrome_color_mixer.cc
++++ b/chrome/browser/ui/color/chrome_color_mixer.cc
+@@ -4,11 +4,13 @@
+ 
+ #include "chrome/browser/ui/color/chrome_color_mixer.h"
+ 
++#include <algorithm>
+ #include <optional>
+ #include <string>
+ 
+ #include "base/feature_list.h"
+ #include "base/logging.h"
++#include "base/numerics/safe_conversions.h"
+ #include "base/strings/string_number_conversions.h"
+ #include "build/branding_buildflags.h"
+ #include "chrome/browser/themes/theme_properties.h"
+@@ -1220,3 +1222,37 @@ void AddChromeColorMixer(ui::ColorProvider* provider,
+   mixer[ui::kColorFrameActive] = {SK_ColorDKGRAY};
+   mixer[ui::kColorFrameInactive] = {SK_ColorGRAY};
+ }
++
++void AddGlassFrameColorMixer(ui::ColorProvider* provider,
++                             const ui::ColorProviderKey& key) {
++  if (key.frame_style != ui::ColorProviderKey::FrameStyle::kGlass) {
++    return;
++  }
++
++  const auto alpha = [](double opacity) {
++    return base::ClampRound<SkAlpha>(std::clamp(opacity, 0.0, 1.0) *
++                                     SK_AlphaOPAQUE);
++  };
++  ui::ColorMixer& mixer = provider->AddMixer();
++
++  // Menus opened from glass windows are translucent. MenuScrollViewContainer
++  // asks the window system to blur what is behind translucent menus.
++  const double menu_opacity = features::kGlassFrameMenuOpacity.Get();
++  if (menu_opacity < 1.0) {
++    mixer[ui::kColorMenuBackground] = {
++        ui::SetAlpha(ui::FromTransformInput(), alpha(menu_opacity))};
++  }
++
++  // chrome:// pages are see-through in glass windows with a translucent
++  // toolbar (see ContentsWebView), showing the frame's glass behind them.
++  // Their cards stay mostly opaque, like the surfaces of a frosted desktop
++  // app.
++  if (features::kGlassFrameToolbarOpacity.Get() < 1.0 &&
++      features::kGlassFrameTransparentWebUI.Get()) {
++    mixer[kColorWebuiPageBackground] = {SK_ColorTRANSPARENT};
++    mixer[kColorSettingsWebuiPageBackground] = {SK_ColorTRANSPARENT};
++    mixer[kColorNewTabPageBackground] = {SK_ColorTRANSPARENT};
++    mixer[kColorWebuiCardBackground] = {
++        ui::SetAlpha(ui::FromTransformInput(), alpha(0.6))};
++  }
++}
+diff --git a/chrome/browser/ui/color/chrome_color_mixer.h b/chrome/browser/ui/color/chrome_color_mixer.h
+index 99f282fb77..f76f24f956 100644
+--- a/chrome/browser/ui/color/chrome_color_mixer.h
++++ b/chrome/browser/ui/color/chrome_color_mixer.h
+@@ -14,6 +14,12 @@ class ColorProvider;
+ 
+ // Adds a color mixer to |provider| that supplies default values for various
+ // chrome/ colors before taking into account any custom themes.
++// Adds a mixer that makes surfaces of glass windows translucent, so that the
++// blurred backdrop behind them shows through. Must come after mixers that set
++// those surfaces' colors.
++void AddGlassFrameColorMixer(ui::ColorProvider* provider,
++                             const ui::ColorProviderKey& key);
++
+ void AddChromeColorMixer(ui::ColorProvider* provider,
+                          const ui::ColorProviderKey& key);
+ 
+diff --git a/chrome/browser/ui/color/chrome_color_mixers.cc b/chrome/browser/ui/color/chrome_color_mixers.cc
+index 8432f49468..1631b8b3c5 100644
+--- a/chrome/browser/ui/color/chrome_color_mixers.cc
++++ b/chrome/browser/ui/color/chrome_color_mixers.cc
+@@ -88,6 +88,9 @@ void AddChromeColorMixers(ui::ColorProvider* provider,
+   // Must be the last one in order to override other mixer colors.
+   AddNativeChromeColorMixer(provider, key);
+ 
++  // Glass makes colors translucent, regardless of where they came from.
++  AddGlassFrameColorMixer(provider, key);
++
+   if (key.custom_theme) {
+     key.custom_theme->AddColorMixers(provider, key);
+   }
+diff --git a/chrome/browser/ui/color/material_tab_strip_color_mixer.cc b/chrome/browser/ui/color/material_tab_strip_color_mixer.cc
+index 1f44b27bb4..de64c66eb8 100644
+--- a/chrome/browser/ui/color/material_tab_strip_color_mixer.cc
++++ b/chrome/browser/ui/color/material_tab_strip_color_mixer.cc
+@@ -4,9 +4,11 @@
+ 
+ #include "chrome/browser/ui/color/material_tab_strip_color_mixer.h"
+ 
++#include "base/numerics/safe_conversions.h"
+ #include "chrome/browser/ui/color/chrome_color_id.h"
+ #include "chrome/browser/ui/color/chrome_color_provider_utils.h"
+ #include "third_party/skia/include/core/SkColor.h"
++#include "ui/base/ui_base_features.h"
+ #include "ui/color/color_id.h"
+ #include "ui/color/color_mixer.h"
+ #include "ui/color/color_provider.h"
+@@ -49,7 +51,11 @@ void AddMaterialTabStripColorMixer(ui::ColorProvider* provider,
+       ui::kColorSysStateHeaderHoverInactive};
+ 
+   if (key.frame_style == ui::ColorProviderKey::FrameStyle::kGlass) {
+-    constexpr SkAlpha kSelectedTabOpacity = 0.80 * SK_AlphaOPAQUE;
++    // When the toolbar is translucent too, the selected tab matches it so the
++    // two still read as one surface.
++    const double toolbar_opacity = features::kGlassFrameToolbarOpacity.Get();
++    const SkAlpha kSelectedTabOpacity = base::ClampRound<SkAlpha>(
++        (toolbar_opacity < 1.0 ? toolbar_opacity : 0.80) * SK_AlphaOPAQUE);
+     mixer[kColorTabBackgroundSelectedFrameActive] = {
+         ui::SetAlpha(ui::GetResultingPaintColor(ui::kColorSysStateHeaderSelect,
+                                                 ui::kColorSysHeader),
+@@ -102,6 +108,19 @@ void AddMaterialTabStripColorMixer(ui::ColorProvider* provider,
+       ui::kColorSysHeaderContainer};
+   mixer[kColorNewTabButtonCRBackgroundFrameInactive] = {
+       ui::kColorSysHeaderContainerInactive};
++  if (key.frame_style == ui::ColorProviderKey::FrameStyle::kGlass) {
++    // With a translucent toolbar, tab strip buttons sit on the glass like the
++    // toolbar does.
++    const double toolbar_opacity = features::kGlassFrameToolbarOpacity.Get();
++    if (toolbar_opacity < 1.0) {
++      const SkAlpha alpha =
++          base::ClampRound<SkAlpha>(toolbar_opacity * SK_AlphaOPAQUE);
++      mixer[kColorNewTabButtonCRBackgroundFrameActive] = {
++          ui::SetAlpha(ui::kColorSysHeaderContainer, alpha)};
++      mixer[kColorNewTabButtonCRBackgroundFrameInactive] = {
++          ui::SetAlpha(ui::kColorSysHeaderContainerInactive, alpha)};
++    }
++  }
+ 
+   mixer[kColorTabSearchButtonCRForegroundFrameActive] = {
+       ui::kColorSysOnSurfacePrimary};
+diff --git a/chrome/browser/ui/tabs/tab_style.cc b/chrome/browser/ui/tabs/tab_style.cc
+index ae95d2dfc2..dace645c38 100644
+--- a/chrome/browser/ui/tabs/tab_style.cc
++++ b/chrome/browser/ui/tabs/tab_style.cc
+@@ -6,6 +6,8 @@
+ 
+ #include <array>
+ 
++#include "base/numerics/safe_conversions.h"
++
+ #include "chrome/browser/ui/layout_constants.h"
+ #include "chrome/browser/ui/tabs/features.h"
+ #include "chrome/browser/ui/ui_features.h"
+@@ -264,7 +266,16 @@ SkColor TabStyle::GetTabBackgroundColor(
+   }
+ 
+   switch (state) {
+-    case TabStyle::TabSelectionState::kActive:
++    case TabStyle::TabSelectionState::kActive: {
++      // When the toolbar is translucent, the active tab is too, so that the
++      // two still read as one surface.
++      const double toolbar_opacity = features::kGlassFrameToolbarOpacity.Get();
++      if (toolbar_opacity < 1.0) {
++        return SkColorSetA(color, base::ClampRound<SkAlpha>(
++                                      toolbar_opacity * SkColorGetA(color)));
++      }
++      return color;
++    }
+     case TabStyle::TabSelectionState::kSelected:
+       return color;
+     case TabStyle::TabSelectionState::kInactive: {
+diff --git a/chrome/browser/ui/views/frame/BUILD.gn b/chrome/browser/ui/views/frame/BUILD.gn
+index 70cffe9c17..5ef409d4dd 100644
+--- a/chrome/browser/ui/views/frame/BUILD.gn
++++ b/chrome/browser/ui/views/frame/BUILD.gn
+@@ -642,6 +642,9 @@ source_set("glass_frame_service") {
+     "//ui/base:features",
+     "//ui/base/unowned_user_data",
+   ]
++  if (is_linux) {
++    deps += [ "//ui/ozone" ]
++  }
+ }
+ 
+ source_set("caption_button_placeholder_container") {
+@@ -1427,6 +1430,7 @@ source_set("contents_web_view") {
+     "//ui/views/controls/webview",
+   ]
+   deps = [
++    ":glass_frame_service",
+     ":safe_invoke",
+     ":web_contents_close_handler",
+     "//chrome/browser/ui/color:color_headers",
+@@ -1437,6 +1441,8 @@ source_set("contents_web_view") {
+     "//skia:skia_core_public_headers",
+     "//third_party/blink/public/common:headers",
+     "//ui/color:color_headers",
++    "//ui/base:features",
++    "//ui/color",
+     "//ui/compositor",
+     "//ui/views",
+   ]
+@@ -2690,6 +2696,7 @@ if (is_linux) {
+       ":browser_desktop_window_tree_host",
+       ":browser_frame_view_linux",
+       ":browser_native_widget_aura_linux",
++      ":glass_frame_service",
+       ":safe_invoke",
+       "//base",
+       "//build:buildflag_header_h",
+@@ -2737,11 +2744,18 @@ if (is_linux) {
+     ]
+     deps = [
+       ":browser_native_widget_aura_linux",
++      ":contents_web_view",
++      ":glass_frame_service",
++      ":top_container_view",
+       "//base:i18n",
+       "//build:buildflag_header_h",
++      "//chrome/browser/ui:layout_constants",
++      "//chrome/browser/ui/browser_window",
++      "//chrome/browser/ui/tabs",
+       "//chrome/browser/ui/views:layout_provider",
+       "//chrome/browser/ui/views/frame:browser_view_header",
+       "//ui/base",
++      "//ui/gfx",
+       "//ui/views",
+     ]
+   }
+@@ -3108,6 +3122,7 @@ source_set("browser_view_tabbed_layout_impl") {
+     ":frame",
+     ":multi_contents_view",
+     ":shadow",
++    ":themed_background",
+     ":vertical_tab_strip_background_blur_backdrop",
+     ":vertical_tab_strip_region_view",
+     "//base",
+diff --git a/chrome/browser/ui/views/frame/browser_desktop_window_tree_host_linux.cc b/chrome/browser/ui/views/frame/browser_desktop_window_tree_host_linux.cc
+index 32e5c1a27f..67e7301554 100644
+--- a/chrome/browser/ui/views/frame/browser_desktop_window_tree_host_linux.cc
++++ b/chrome/browser/ui/views/frame/browser_desktop_window_tree_host_linux.cc
+@@ -4,6 +4,8 @@
+ 
+ #include "chrome/browser/ui/views/frame/browser_desktop_window_tree_host_linux.h"
+ 
++#include <algorithm>
++#include <iterator>
+ #include <optional>
+ #include <utility>
+ 
+@@ -14,15 +16,18 @@
+ #include "chrome/browser/ui/views/frame/browser_frame_view_linux.h"
+ #include "chrome/browser/ui/views/frame/browser_native_widget_aura_linux.h"
+ #include "chrome/browser/ui/views/frame/browser_view.h"
++#include "chrome/browser/ui/views/frame/glass_frame_service.h"
+ #include "chrome/browser/ui/views/frame/safe_invoke/safe_invoke.h"
+ #include "chrome/browser/ui/views/tabs/dragging/tab_drag_controller.h"
+ #include "chrome/browser/ui/views/tabs/tab_strip.h"
+ #include "third_party/abseil-cpp/absl/container/flat_hash_set.h"
++#include "third_party/skia/include/core/SkRRect.h"
+ #include "ui/base/dragdrop/mojom/drag_drop_types.mojom-shared.h"
+ #include "ui/base/mojom/window_show_state.mojom.h"
+ #include "ui/base/ui_base_features.h"
+ #include "ui/gfx/geometry/rect.h"
+ #include "ui/gfx/geometry/rect_conversions.h"
++#include "ui/gfx/geometry/skia_conversions.h"
+ #include "ui/linux/linux_ui.h"
+ #include "ui/ozone/public/ozone_platform.h"
+ #include "ui/platform_window/extensions/x11_extension.h"
+@@ -180,8 +185,10 @@ void BrowserDesktopWindowTreeHostLinux::UpdateFrameHints() {
+ 
+   if (ui::OzonePlatform::GetInstance()->IsWindowCompositingSupported()) {
+     // Set the opaque region.
++    const bool showing_frame =
++        IsShowingFrame(native_widget_->UseCustomFrame(), window_state);
+     std::vector<gfx::Rect> opaque_region;
+-    if (IsShowingFrame(native_widget_->UseCustomFrame(), window_state)) {
++    if (showing_frame) {
+       opaque_region =
+           views::GetRestoredOpaqueRegion(view->GetRestoredClipRegion(), scale,
+                                          view->GetTranslucentTopAreaHeight());
+@@ -194,7 +201,25 @@ void BrowserDesktopWindowTreeHostLinux::UpdateFrameHints() {
+       opaque_region.push_back(
+           gfx::ScaleToEnclosingRect(opaque_region_dip, scale));
+     }
++
++    // Glass is translucent, and the compositor blurs what is behind it.
++    std::optional<std::vector<gfx::Rect>> blur_region;
++    if (const std::vector<gfx::Rect> glass_region = view->GetGlassFrameRegion();
++        !glass_region.empty()) {
++      const SkRRect window_shape =
++          showing_frame ? view->GetRestoredClipRegion()
++                        : SkRRect::MakeRect(gfx::RectToSkRect(
++                              gfx::Rect(widget_size)));
++      blur_region.emplace();
++      for (const auto& rect : glass_region) {
++        opaque_region = views::SubtractRectFromRegion(
++            opaque_region, gfx::ScaleToEnclosingRect(rect, scale));
++        std::ranges::move(views::GetRegionInsideClip(window_shape, rect, scale),
++                          std::back_inserter(*blur_region));
++      }
++    }
+     window->SetOpaqueRegion(opaque_region);
++    window->SetBackgroundBlurRegion(std::move(blur_region));
+   }
+ 
+   SizeConstraintsChanged();
+@@ -321,6 +346,15 @@ void BrowserDesktopWindowTreeHostLinux::OnWindowTiledStateChanged(
+   }
+ }
+ 
++void BrowserDesktopWindowTreeHostLinux::OnBackgroundBlurSupportChanged() {
++  // Glass needs the compositor's blur; let the service re-evaluate which
++  // windows can show it. Windows whose eligibility changes update their
++  // frame hints in response.
++  if (auto* const glass_frame_service = GlassFrameService::GetInstance()) {
++    glass_frame_service->OnPlatformBlurSupportChanged();
++  }
++}
++
+ void BrowserDesktopWindowTreeHostLinux::OnNativeThemeUpdated(
+     ui::NativeTheme* observed_theme) {
+   views::DesktopWindowTreeHostLinux::OnNativeThemeUpdated(observed_theme);
+diff --git a/chrome/browser/ui/views/frame/browser_desktop_window_tree_host_linux.h b/chrome/browser/ui/views/frame/browser_desktop_window_tree_host_linux.h
+index d17a9cf241..2c272c3add 100644
+--- a/chrome/browser/ui/views/frame/browser_desktop_window_tree_host_linux.h
++++ b/chrome/browser/ui/views/frame/browser_desktop_window_tree_host_linux.h
+@@ -89,6 +89,7 @@ class BrowserDesktopWindowTreeHostLinux
+   void OnWindowStateChanged(ui::PlatformWindowState old_state,
+                             ui::PlatformWindowState new_state) override;
+   void OnWindowTiledStateChanged(ui::WindowTiledEdges new_tiled_edges) override;
++  void OnBackgroundBlurSupportChanged() override;
+ 
+   // ui::NativeThemeObserver:
+   void OnNativeThemeUpdated(ui::NativeTheme* observed_theme) override;
+diff --git a/chrome/browser/ui/views/frame/browser_frame_view.cc b/chrome/browser/ui/views/frame/browser_frame_view.cc
+index d046a11f01..bd4a7ecc51 100644
+--- a/chrome/browser/ui/views/frame/browser_frame_view.cc
++++ b/chrome/browser/ui/views/frame/browser_frame_view.cc
+@@ -304,6 +304,10 @@ int BrowserFrameView::GetTranslucentTopAreaHeight() const {
+   return 0;
+ }
+ 
++std::vector<gfx::Rect> BrowserFrameView::GetGlassFrameRegion() const {
++  return {};
++}
++
+ void BrowserFrameView::SetFrameBounds(const gfx::Rect& bounds) {
+   browser_widget_->SetBounds(bounds);
+ }
+diff --git a/chrome/browser/ui/views/frame/browser_frame_view.h b/chrome/browser/ui/views/frame/browser_frame_view.h
+index 3bcfe2a820..69545942d0 100644
+--- a/chrome/browser/ui/views/frame/browser_frame_view.h
++++ b/chrome/browser/ui/views/frame/browser_frame_view.h
+@@ -5,8 +5,10 @@
+ #ifndef CHROME_BROWSER_UI_VIEWS_FRAME_BROWSER_FRAME_VIEW_H_
+ #define CHROME_BROWSER_UI_VIEWS_FRAME_BROWSER_FRAME_VIEW_H_
+ 
++#include <optional>
+ #include <ostream>
+ #include <utility>
++#include <vector>
+ 
+ #include "base/memory/raw_ptr.h"
+ #include "build/build_config.h"
+@@ -188,6 +190,13 @@ class BrowserFrameView : public views::FrameView {
+   // 0 if the frame is opaque (not transparent) or in fullscreen.
+   virtual int GetTranslucentTopAreaHeight() const;
+ 
++  // Returns the area of the frame, in DIPs and in this view's coordinates,
++  // that is drawn as translucent glass over a backdrop the window system
++  // blurs, as a union of rects. Empty if the frame does not currently show
++  // glass. Only used by platforms where the blur is requested per-region
++  // (Linux).
++  virtual std::vector<gfx::Rect> GetGlassFrameRegion() const;
++
+   // Sets the bounds of `frame_`.
+   virtual void SetFrameBounds(const gfx::Rect& bounds);
+ 
+diff --git a/chrome/browser/ui/views/frame/browser_frame_view_linux.cc b/chrome/browser/ui/views/frame/browser_frame_view_linux.cc
+index 474b8356af..00c4d2f2af 100644
+--- a/chrome/browser/ui/views/frame/browser_frame_view_linux.cc
++++ b/chrome/browser/ui/views/frame/browser_frame_view_linux.cc
+@@ -4,15 +4,34 @@
+ 
+ #include "chrome/browser/ui/views/frame/browser_frame_view_linux.h"
+ 
++#include <algorithm>
++
++#include "base/functional/bind.h"
++#include "base/functional/callback_helpers.h"
++#include "base/i18n/rtl.h"
+ #include "base/notreached.h"
++#include "base/numerics/safe_conversions.h"
++#include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
++#include "chrome/browser/ui/layout_constants.h"
++#include "chrome/browser/ui/tabs/vertical_tab_strip_state.h"
++#include "chrome/browser/ui/tabs/vertical_tab_strip_state_controller.h"
+ #include "chrome/browser/ui/views/chrome_layout_provider.h"
+ #include "chrome/browser/ui/views/frame/browser_native_widget_aura_linux.h"
+ #include "chrome/browser/ui/views/frame/browser_view.h"
++#include "chrome/browser/ui/views/frame/contents_web_view.h"
++#include "chrome/browser/ui/views/frame/glass_frame_service.h"
++#include "chrome/browser/ui/views/frame/top_container_view.h"
++#include "third_party/skia/include/core/SkBlendMode.h"
+ #include "ui/base/hit_test.h"
+ #include "ui/base/metadata/metadata_impl_macros.h"
++#include "ui/base/ui_base_features.h"
++#include "ui/gfx/canvas.h"
++#include "ui/gfx/color_utils.h"
+ #include "ui/gfx/geometry/insets_f.h"
+ #include "ui/gfx/geometry/rect_f.h"
+ #include "ui/gfx/geometry/rounded_corners_f.h"
++#include "ui/gfx/geometry/skia_conversions.h"
++#include "ui/gfx/scoped_canvas.h"
+ #include "ui/gfx/shadow_value.h"
+ #include "ui/linux/linux_ui.h"
+ #include "ui/views/layout/layout_provider.h"
+@@ -26,6 +45,13 @@ namespace {
+ // bottom resize borders.
+ constexpr int kResizeTopBorderThickness = 4;
+ 
++// Extends the glass area past the vertical tab strip so that the toolbar and
++// window corner radii meet without a visible seam. Matches the macOS glass
++// frame.
++int GetGlassCornerPadding() {
++  return GetLayoutConstant(LayoutConstant::kToolbarCornerRadius) * 2;
++}
++
+ }  // namespace
+ 
+ BrowserFrameViewLinux::BrowserFrameViewLinux(
+@@ -38,6 +64,47 @@ BrowserFrameViewLinux::BrowserFrameViewLinux(
+     window_button_order_observation_.Observe(linux_ui);
+     OnWindowButtonOrderingChange();
+   }
++
++  // GlassFrameService only exists if the glass frame is enabled.
++  if (auto* const glass_frame_service = GlassFrameService::GetInstance()) {
++    BrowserWindowInterface* const browser = browser_view->browser();
++    is_glass_frame_eligible_ =
++        glass_frame_service->IsBrowserWindowEligible(browser);
++    glass_frame_eligibility_subscription_ =
++        glass_frame_service->RegisterGlassFrameEligibilityChangedCallback(
++            browser, base::BindRepeating(
++                         &BrowserFrameViewLinux::OnGlassFrameEligibilityChanged,
++                         base::Unretained(this)));
++    // The tint gets slightly stronger when several profiles are open.
++    multiple_open_profiles_subscription_ =
++        glass_frame_service->RegisterMultipleOpenProfilesChangedCallback(
++            base::BindRepeating(&BrowserFrameViewLinux::SchedulePaint,
++                                base::Unretained(this)));
++
++    if (features::kGlassFrameToolbarOpacity.Get() < 1.0 &&
++        browser_view->top_container()) {
++      top_container_observation_.Observe(browser_view->top_container());
++    }
++
++    // The glass area follows the width of the vertical tab strip.
++    if (auto* const controller =
++            tabs::VerticalTabStripStateController::From(browser)) {
++      const auto on_geometry_changed =
++          base::BindRepeating(&BrowserFrameViewLinux::OnGlassFrameGeometryChanged,
++                              base::Unretained(this));
++      vertical_tab_strip_subscriptions_.push_back(
++          controller->RegisterOnModeChanged(
++              base::IgnoreArgs<tabs::VerticalTabStripStateController*>(
++                  on_geometry_changed)));
++      vertical_tab_strip_subscriptions_.push_back(
++          controller->RegisterOnCollapseChanged(
++              base::IgnoreArgs<tabs::VerticalTabStripCollapseState>(
++                  on_geometry_changed)));
++      vertical_tab_strip_subscriptions_.push_back(
++          controller->RegisterOnResizingChanged(
++              base::IgnoreArgs<bool>(on_geometry_changed)));
++    }
++  }
+ }
+ 
+ BrowserFrameViewLinux::~BrowserFrameViewLinux() = default;
+@@ -77,10 +144,28 @@ void BrowserFrameViewLinux::PaintRestoredFrameBorder(
+ #endif
+   auto shadow_values =
+       tiled ? gfx::ShadowValues() : GetShadowValues(ShouldPaintAsActive());
++  const SkRRect clip = GetRestoredClipRegion();
++  views::FrameBackground* background = frame_background();
++  if (IsGlassFrameActive()) {
++    gfx::ScopedCanvas scoped_canvas(canvas);
++    canvas->sk_canvas()->clipRRect(clip, SkClipOp::kIntersect, true);
++    PaintGlassFrameBackground(canvas);
++    // Only paint the border and shadow below.
++    background = nullptr;
++  }
+   views::PaintRestoredFrameBorderLinux(
+-      *canvas, *this, frame_background(), GetRestoredClipRegion(),
+-      ShouldDrawRestoredFrameShadow(), ShouldPaintAsActive(),
+-      layout_->RestoredMirroredFrameBorderInsets(), shadow_values, tiled);
++      *canvas, *this, background, clip, ShouldDrawRestoredFrameShadow(),
++      ShouldPaintAsActive(), layout_->RestoredMirroredFrameBorderInsets(),
++      shadow_values, tiled);
++}
++
++void BrowserFrameViewLinux::PaintMaximizedFrameBorder(
++    gfx::Canvas* canvas) const {
++  if (IsGlassFrameActive()) {
++    PaintGlassFrameBackground(canvas);
++    return;
++  }
++  OpaqueBrowserFrameView::PaintMaximizedFrameBorder(canvas);
+ }
+ 
+ void BrowserFrameViewLinux::GetWindowMask(const gfx::Size& size,
+@@ -124,6 +209,86 @@ int BrowserFrameViewLinux::NonClientHitTest(const gfx::Point& point) {
+   return frame_component;
+ }
+ 
++bool BrowserFrameViewLinux::IsGlassFrameActive() const {
++  return is_glass_frame_eligible_ &&
++         views::Widget::IsWindowCompositingSupported() &&
++         !browser_widget()->IsFullscreen();
++}
++
++void BrowserFrameViewLinux::PaintGlassFrameBackground(
++    gfx::Canvas* canvas) const {
++  const std::vector<gfx::Rect> glass_region = GetGlassFrameRegion();
++  CHECK(!glass_region.empty());
++  const SkColor frame_color = SkColorSetA(
++      GetFrameColor(BrowserFrameActiveState::kUseCurrent), SK_AlphaOPAQUE);
++
++  // Outside of the glass, the frame is opaque.
++  {
++    gfx::ScopedCanvas scoped_canvas(canvas);
++    for (const auto& rect : glass_region) {
++      canvas->sk_canvas()->clipRect(gfx::RectToSkRect(rect),
++                                    SkClipOp::kDifference);
++    }
++    canvas->DrawColor(frame_color);
++  }
++
++  // Inside, tint the backdrop the compositor blurs. The tint replaces rather
++  // than blends with what is in the buffer, since its alpha is what lets the
++  // blurred backdrop show through.
++  auto* const glass_frame_service = GlassFrameService::GetInstance();
++  const double tint_opacity = GlassFrameService::GetTintOpacity(
++      color_utils::IsDark(frame_color),
++      GetBrowserView()->ShouldDrawVerticalTabStrip(),
++      glass_frame_service && glass_frame_service->HasMultipleOpenProfiles());
++  const SkColor tint = SkColorSetA(
++      frame_color, base::ClampRound<SkAlpha>(tint_opacity * SK_AlphaOPAQUE));
++  for (const auto& rect : glass_region) {
++    canvas->FillRect(rect, tint, SkBlendMode::kSrc);
++  }
++}
++
++void BrowserFrameViewLinux::OnGlassFrameEligibilityChanged(bool is_eligible) {
++  if (is_glass_frame_eligible_ == is_eligible) {
++    return;
++  }
++  is_glass_frame_eligible_ = is_eligible;
++  OnGlassFrameGeometryChanged();
++}
++
++void BrowserFrameViewLinux::OnGlassFrameGeometryChanged() {
++  SchedulePaint();
++  if (auto* const native_widget = static_cast<BrowserNativeWidgetAuraLinux*>(
++          browser_widget()->browser_native_widget())) {
++    native_widget->UpdateFrameHints();
++  }
++}
++
++void BrowserFrameViewLinux::Layout(PassKey) {
++  LayoutSuperclass<OpaqueBrowserFrameView>(this);
++
++  // The window's opaque and blur regions depend on the glass area, which
++  // depends on this view's size. Frame hints can be computed while this view
++  // is not laid out yet, e.g. right after the frame is regenerated for a theme
++  // change, so update them once the glass area is known.
++  MaybeUpdateGlassFrameGeometry();
++}
++
++void BrowserFrameViewLinux::OnViewBoundsChanged(views::View* observed_view) {
++  MaybeUpdateGlassFrameGeometry();
++}
++
++void BrowserFrameViewLinux::OnViewIsDeleting(views::View* observed_view) {
++  top_container_observation_.Reset();
++}
++
++void BrowserFrameViewLinux::MaybeUpdateGlassFrameGeometry() {
++  std::vector<gfx::Rect> glass_region = GetGlassFrameRegion();
++  if (glass_region != last_glass_frame_region_) {
++    last_glass_frame_region_ = std::move(glass_region);
++    OnGlassFrameGeometryChanged();
++  }
++}
++
+ float BrowserFrameViewLinux::GetRestoredCornerRadiusDip() const {
+ #if BUILDFLAG(IS_LINUX)
+   const bool tiled = browser_widget()->tiled();
+@@ -142,6 +307,74 @@ int BrowserFrameViewLinux::GetTranslucentTopAreaHeight() const {
+   return 0;
+ }
+ 
++std::vector<gfx::Rect> BrowserFrameViewLinux::GetGlassFrameRegion() const {
++  if (!IsGlassFrameActive()) {
++    return {};
++  }
++
++  BrowserView* const browser_view = GetBrowserView();
++  const gfx::Rect client_bounds = GetBoundsForClientView();
++  std::vector<gfx::Rect> region;
++
++  // Behind see-through contents, the whole window is glass.
++  for (ContentsWebView* contents_web_view :
++       browser_view->GetAllVisibleContentsWebViews()) {
++    if (contents_web_view->is_transparent()) {
++      region.push_back(GetLocalBounds());
++      return region;
++    }
++  }
++
++  // A band across the top of the window.
++  int band_bottom = 0;
++  if (features::kGlassFrameToolbarOpacity.Get() < 1.0 &&
++      browser_view->top_container()) {
++    // The whole top chrome is glass, down to the contents, plus an overlap so
++    // that the contents' rounded corners are backed by glass.
++    views::View* const top_container = browser_view->top_container();
++    const gfx::Rect top_container_bounds = views::View::ConvertRectToTarget(
++        top_container, this, top_container->GetLocalBounds());
++    band_bottom = top_container_bounds.bottom() + GetGlassCornerPadding();
++  } else if (!browser_view->ShouldDrawVerticalTabStrip()) {
++    // The glass covers the tab strip and toolbar, plus a slight overlap into
++    // the contents so that the toolbar's rounded corners are backed by glass.
++    const ClientFrameElementInfo info = browser_view->GetFrameElementInfo();
++    band_bottom = client_bounds.y() + info.top_area_height() +
++                  info.toolbar_preferred_height;
++  }
++  if (band_bottom > 0) {
++    region.emplace_back(0, 0, width(), std::min(band_bottom, height()));
++  }
++
++  if (browser_view->ShouldDrawVerticalTabStrip()) {
++    // The glass spans the full height of the window, as wide as the vertical
++    // tab strip.
++    const int corner_padding = GetGlassCornerPadding();
++    const int max_width =
++        tabs::kVerticalTabStripUncollapsedMaxWidth + corner_padding;
++    int glass_width = max_width;
++    // While the tab strip is being resized, cover the maximum width to avoid
++    // updating the window's regions on every mouse move.
++    if (auto* const controller = tabs::VerticalTabStripStateController::From(
++            browser_view->browser());
++        controller && !controller->IsResizing()) {
++      glass_width = std::min(
++          max_width, (controller->IsCollapsed()
++                          ? tabs::kVerticalTabStripCollapsedWidth
++                          : controller->GetUncollapsedWidth()) +
++                         corner_padding);
++    }
++    // Extend to the outer edge of the frame; the window's clip shape trims it.
++    if (base::i18n::IsRTL()) {
++      const int x = client_bounds.right() - glass_width;
++      region.emplace_back(x, 0, width() - x, height());
++    } else {
++      region.emplace_back(0, 0, client_bounds.x() + glass_width, height());
++    }
++  }
++  return region;
++}
++
+ BrowserLayoutParams BrowserFrameViewLinux::GetBrowserLayoutParams() const {
+   BrowserLayoutParams params;
+   params.visual_client_area = GetBoundsForClientView();
+diff --git a/chrome/browser/ui/views/frame/browser_frame_view_linux.h b/chrome/browser/ui/views/frame/browser_frame_view_linux.h
+index 382436b045..c8ad8a2f76 100644
+--- a/chrome/browser/ui/views/frame/browser_frame_view_linux.h
++++ b/chrome/browser/ui/views/frame/browser_frame_view_linux.h
+@@ -5,11 +5,17 @@
+ #ifndef CHROME_BROWSER_UI_VIEWS_FRAME_BROWSER_FRAME_VIEW_LINUX_H_
+ #define CHROME_BROWSER_UI_VIEWS_FRAME_BROWSER_FRAME_VIEW_LINUX_H_
+ 
++#include <optional>
++#include <vector>
++
++#include "base/callback_list.h"
+ #include "base/memory/raw_ptr.h"
++#include "base/scoped_observation.h"
+ #include "chrome/browser/ui/views/frame/browser_frame_view_layout_linux.h"
+ #include "chrome/browser/ui/views/frame/opaque_browser_frame_view.h"
+ #include "ui/base/metadata/metadata_header_macros.h"
+ #include "ui/linux/window_button_order_observer.h"
++#include "ui/views/view_observer.h"
+ 
+ namespace ui {
+ class LinuxUi;
+@@ -18,7 +24,8 @@ class LinuxUi;
+ // A specialization of OpaqueBrowserFrameView that is also able to
+ // render client side decorations (shadow, border, and rounded corners).
+ class BrowserFrameViewLinux : public OpaqueBrowserFrameView,
+-                              public ui::WindowButtonOrderObserver {
++                              public ui::WindowButtonOrderObserver,
++                              public views::ViewObserver {
+   METADATA_HEADER(BrowserFrameViewLinux, OpaqueBrowserFrameView)
+ 
+  public:
+@@ -38,12 +45,16 @@ class BrowserFrameViewLinux : public OpaqueBrowserFrameView,
+   gfx::Insets GetInputInsets() const override;
+   SkRRect GetRestoredClipRegion() const override;
+   int GetTranslucentTopAreaHeight() const override;
++  std::vector<gfx::Rect> GetGlassFrameRegion() const override;
+   BrowserLayoutParams GetBrowserLayoutParams() const override;
+   bool CaptionButtonsOnLeadingEdge() const override;
+   bool CaptionButtonsOnTrailingEdge() const override;
+   BoundsAndMargins GetCaptionButtonBounds() const override;
+   gfx::RoundedCornersF GetWindowRoundedCorners() const override;
+ 
++  // views::View:
++  void Layout(PassKey) override;
++
+   // Gets the shadow metrics (radius, offset, and number of shadows).  This will
+   // always return shadow values, even if shadows are not actually drawn.
+   // `active` indicates if the shadow will be drawn on a focused browser window.
+@@ -52,12 +63,17 @@ class BrowserFrameViewLinux : public OpaqueBrowserFrameView,
+  protected:
+   // OpaqueBrowserFrameView:
+   void PaintRestoredFrameBorder(gfx::Canvas* canvas) const override;
++  void PaintMaximizedFrameBorder(gfx::Canvas* canvas) const override;
+   void GetWindowMask(const gfx::Size& size, SkPath* window_mask) override;
+   bool ShouldDrawRestoredFrameShadow() const override;
+ 
+   // ui::WindowButtonOrderObserver:
+   void OnWindowButtonOrderingChange() override;
+ 
++  // views::ViewObserver:
++  void OnViewBoundsChanged(views::View* observed_view) override;
++  void OnViewIsDeleting(views::View* observed_view) override;
++
+   // views::FrameView:
+   int NonClientHitTest(const gfx::Point& point) override;
+ 
+@@ -66,9 +82,38 @@ class BrowserFrameViewLinux : public OpaqueBrowserFrameView,
+   // disabled (eg. if the compositor doesn't support translucency.)
+   virtual float GetRestoredCornerRadiusDip() const;
+ 
++  // Returns true if the frame is currently drawn as translucent glass over a
++  // backdrop blurred by the compositor. See GlassFrameService.
++  bool IsGlassFrameActive() const;
++
+  private:
++  // Paints the frame background in glass mode: a translucent tint over the
++  // glass area and an opaque frame color everywhere else.
++  void PaintGlassFrameBackground(gfx::Canvas* canvas) const;
++
++  void OnGlassFrameEligibilityChanged(bool is_eligible);
++
++  // Repaints the frame and updates the window's opaque and blur regions after
++  // the glass area may have changed.
++  void OnGlassFrameGeometryChanged();
++
++  // Calls OnGlassFrameGeometryChanged() if the glass area is different from
++  // the one the frame hints were last updated for.
++  void MaybeUpdateGlassFrameGeometry();
++
+   const raw_ptr<BrowserFrameViewLayoutLinux> layout_;
+ 
++  bool is_glass_frame_eligible_ = false;
++  // The glass area the window's frame hints were last updated for.
++  std::vector<gfx::Rect> last_glass_frame_region_;
++  base::CallbackListSubscription glass_frame_eligibility_subscription_;
++  base::CallbackListSubscription multiple_open_profiles_subscription_;
++  std::vector<base::CallbackListSubscription> vertical_tab_strip_subscriptions_;
++  // With a translucent toolbar, the glass extends to the bottom of the top
++  // container, which changes e.g. when the bookmarks bar is shown.
++  base::ScopedObservation<views::View, views::ViewObserver>
++      top_container_observation_{this};
++
+   base::ScopedObservation<ui::LinuxUi, ui::WindowButtonOrderObserver>
+       window_button_order_observation_{this};
+ };
+diff --git a/chrome/browser/ui/views/frame/browser_frame_view_linux_native.cc b/chrome/browser/ui/views/frame/browser_frame_view_linux_native.cc
+index 9b2012decf..67f3c6f857 100644
+--- a/chrome/browser/ui/views/frame/browser_frame_view_linux_native.cc
++++ b/chrome/browser/ui/views/frame/browser_frame_view_linux_native.cc
+@@ -57,6 +57,12 @@ float BrowserFrameViewLinuxNative::GetRestoredCornerRadiusDip() const {
+ 
+ void BrowserFrameViewLinuxNative::PaintRestoredFrameBorder(
+     gfx::Canvas* canvas) const {
++  // The toolkit's frame is opaque, so glass replaces it with Chrome's own
++  // frame painting.
++  if (IsGlassFrameActive()) {
++    BrowserFrameViewLinux::PaintRestoredFrameBorder(canvas);
++    return;
++  }
+   layout_->GetFrameProvider()->PaintWindowFrame(
+       canvas, GetLocalBounds(), GetTopAreaHeight(), ShouldPaintAsActive(),
+       GetInputInsets());
+diff --git a/chrome/browser/ui/views/frame/browser_native_widget_aura_linux.cc b/chrome/browser/ui/views/frame/browser_native_widget_aura_linux.cc
+index f8737ba6c7..579b821e16 100644
+--- a/chrome/browser/ui/views/frame/browser_native_widget_aura_linux.cc
++++ b/chrome/browser/ui/views/frame/browser_native_widget_aura_linux.cc
+@@ -115,6 +115,12 @@ bool BrowserNativeWidgetAuraLinux::ShouldDrawRestoredFrameShadow() const {
+   return host_->SupportsClientFrameShadow() && UseCustomFrame();
+ }
+ 
++void BrowserNativeWidgetAuraLinux::UpdateFrameHints() {
++  if (host_) {
++    host_->UpdateFrameHints();
++  }
++}
++
+ void BrowserNativeWidgetAuraLinux::OnUseCustomChromeFrameChanged() {
+   if (!browser_widget()) {
+     return;
+diff --git a/chrome/browser/ui/views/frame/browser_native_widget_aura_linux.h b/chrome/browser/ui/views/frame/browser_native_widget_aura_linux.h
+index 6487dbb22f..0da9735842 100644
+--- a/chrome/browser/ui/views/frame/browser_native_widget_aura_linux.h
++++ b/chrome/browser/ui/views/frame/browser_native_widget_aura_linux.h
+@@ -28,6 +28,10 @@ class BrowserNativeWidgetAuraLinux : public BrowserNativeWidgetAura {
+ 
+   bool ShouldDrawRestoredFrameShadow() const;
+ 
++  // Asks the window tree host to recompute the window's opaque, input and
++  // blur regions, e.g. after the frame's glass area changed.
++  void UpdateFrameHints();
++
+   void set_host(BrowserDesktopWindowTreeHostLinux* host) { host_ = host; }
+ 
+  protected:
+diff --git a/chrome/browser/ui/views/frame/browser_native_widget_mac.mm b/chrome/browser/ui/views/frame/browser_native_widget_mac.mm
+index 73a8db26c2..4419de3439 100644
+--- a/chrome/browser/ui/views/frame/browser_native_widget_mac.mm
++++ b/chrome/browser/ui/views/frame/browser_native_widget_mac.mm
+@@ -4,8 +4,6 @@
+ 
+ #import "chrome/browser/ui/views/frame/browser_native_widget_mac.h"
+ 
+-#include <array>
+-
+ #import "base/apple/foundation_util.h"
+ #include "base/check_op.h"
+ #include "base/functional/bind.h"
+@@ -110,24 +108,6 @@ bool ShouldHandleKeyboardEvent(const input::NativeWebKeyboardEvent& event) {
+   return event.os_event && event.os_event.Get().type == NSEventTypeKeyDown;
+ }
+ 
+-double GetGlassFrameTintOpacity(bool is_dark_mode,
+-                                bool is_vertical_tabs,
+-                                bool are_multiple_profiles_open) {
+-  // Default opacities mapped by [is_vertical_tabs][is_dark_mode]:
+-  // Values updated after discussion with UX.
+-  static constexpr std::array<std::array<double, 2>, 2> kDefaultOpacities = {{
+-      {0.55, 0.80},  // Horizontal: light, dark
+-      {0.65, 0.80},  // Vertical: light, dark
+-  }};
+-
+-  double opacity = kDefaultOpacities[is_vertical_tabs][is_dark_mode];
+-  if (are_multiple_profiles_open) {
+-    const double multiple_open_profiles_opacity_increase = 0.05;
+-    opacity += multiple_open_profiles_opacity_increase;
+-  }
+-  return std::clamp(opacity, 0.0, 1.0);
+-}
+-
+ bool IsCommandTriggeredFromMacMenu(NSInteger parent_menu_tag, int command_id) {
+   NSEvent* current_event = [NSApp currentEvent];
+   const bool is_mouse_click =
+@@ -1178,9 +1158,9 @@ void BrowserNativeWidgetMac::UpdateBackgroundColor() {
+   last_is_vertical_tabs_ = is_vertical_tabs;
+   has_multiple_profiles_open_ = are_multiple_profiles_open;
+ 
+-  const double tint_opacity =
+-      GetGlassFrameTintOpacity(color_utils::IsDark(theme_color),
+-                               is_vertical_tabs, has_multiple_profiles_open_);
++  const double tint_opacity = GlassFrameService::GetTintOpacity(
++      color_utils::IsDark(theme_color), is_vertical_tabs,
++      has_multiple_profiles_open_);
+ 
+   const CGFloat r = SkColorGetR(theme_color) / 255.0;
+   const CGFloat g = SkColorGetG(theme_color) / 255.0;
+diff --git a/chrome/browser/ui/views/frame/contents_web_view.cc b/chrome/browser/ui/views/frame/contents_web_view.cc
+index 1d0ea60d8f..564e54334b 100644
+--- a/chrome/browser/ui/views/frame/contents_web_view.cc
++++ b/chrome/browser/ui/views/frame/contents_web_view.cc
+@@ -7,6 +7,7 @@
+ #include "base/debug/dump_without_crashing.h"
+ #include "build/build_config.h"
+ #include "chrome/browser/ui/color/chrome_color_id.h"
++#include "chrome/browser/ui/views/frame/glass_frame_service.h"
+ #include "chrome/browser/ui/views/frame/safe_invoke/safe_invoke.h"
+ #include "chrome/browser/ui/views/frame/web_contents_close_handler.h"
+ #include "chrome/browser/ui/views/status_bubble_views.h"
+@@ -14,14 +15,17 @@
+ #include "components/web_modal/web_contents_modal_dialog_manager.h"
+ #include "content/public/browser/render_widget_host_view.h"
+ #include "content/public/browser/web_contents.h"
++#include "content/public/common/url_constants.h"
+ #include "third_party/blink/public/common/input/web_input_event.h"
+ #include "third_party/skia/include/core/SkColor.h"
++#include "ui/base/ui_base_features.h"
+ #include "ui/base/metadata/metadata_impl_macros.h"
+ #include "ui/color/color_provider.h"
+ #include "ui/compositor/layer_solid_color.h"
+ #include "ui/compositor/layer_tree_owner.h"
+ #include "ui/views/view_class_properties.h"
+ #include "ui/views/widget/widget.h"
++#include "ui/views/window/non_client_view.h"
+ 
+ #if defined(USE_AURA)
+ #include "ui/aura/window.h"
+@@ -200,7 +204,49 @@ void ContentsWebView::DidGetUserInteraction(const blink::WebInputEvent& event) {
+ }
+ #endif
+ 
++void ContentsWebView::PrimaryPageChanged(content::Page& page) {
++  views::WebView::PrimaryPageChanged(page);
++  if (GetWidget()) {
++    UpdateBackgroundColor();
++  }
++}
++
++bool ContentsWebView::ShouldBeTransparent() const {
++  const views::Widget* const widget = GetWidget();
++  if (!widget || !web_contents() ||
++      features::kGlassFrameToolbarOpacity.Get() >= 1.0) {
++    return false;
++  }
++  // Only browser windows that currently show glass.
++  auto* const glass_frame_service = GlassFrameService::GetInstance();
++  auto* const tab = tabs::TabInterface::MaybeGetFromContents(web_contents());
++  if (!glass_frame_service || !tab || !tab->GetBrowserWindowInterface() ||
++      !glass_frame_service->IsBrowserWindowEligible(
++          tab->GetBrowserWindowInterface())) {
++    return false;
++  }
++  if (features::kGlassFrameTransparentWebContents.Get()) {
++    return true;
++  }
++  return features::kGlassFrameTransparentWebUI.Get() &&
++         web_contents()->GetLastCommittedURL().SchemeIs(
++             content::kChromeUIScheme);
++}
++
+ void ContentsWebView::UpdateBackgroundColor() {
++  // See-through contents need the glass frame behind them to cover the
++  // contents area too, so let the frame know when that changes.
++  const bool transparent = ShouldBeTransparent();
++  if (transparent != is_transparent_) {
++    is_transparent_ = transparent;
++    if (views::NonClientView* const non_client_view =
++            GetWidget()->non_client_view();
++        non_client_view && non_client_view->frame_view()) {
++      non_client_view->frame_view()->InvalidateLayout();
++    }
++  }
++  const bool background_visible = background_visible_ && !transparent;
++
+   const SkColor color = GetColorProvider()->GetColor(
+       is_letterboxing() ? kColorWebContentsBackgroundLetterboxing
+                         : kColorWebContentsBackground);
+@@ -209,19 +255,19 @@ void ContentsWebView::UpdateBackgroundColor() {
+   // TODO(crbug.com/456309057): Update this to be a CHECK.
+   if (SkColorGetA(color) != SK_AlphaOPAQUE) {
+     base::debug::DumpWithoutCrashing();
+-    if (background_visible_) {
++    if (background_visible) {
+       return;
+     }
+   }
+ 
+   auto* background_layer = layer()->AsSolidColor();
+   background_layer->SetColor(
+-      SkColor4f::FromColor(background_visible_ ? color : SK_ColorTRANSPARENT));
++      SkColor4f::FromColor(background_visible ? color : SK_ColorTRANSPARENT));
+ 
+   SafeInvoke(web_contents())
+       .Then(&content::WebContents::GetRenderWidgetHostView)
+       .Then(&content::RenderWidgetHostView::SetBackgroundColor,
+-            background_visible_ ? color : SK_ColorTRANSPARENT);
++            background_visible ? color : SK_ColorTRANSPARENT);
+ }
+ 
+ std::unique_ptr<ui::Layer> ContentsWebView::RecreateLayer() {
+diff --git a/chrome/browser/ui/views/frame/contents_web_view.h b/chrome/browser/ui/views/frame/contents_web_view.h
+index 0dc0d4b8d3..0392607ce7 100644
+--- a/chrome/browser/ui/views/frame/contents_web_view.h
++++ b/chrome/browser/ui/views/frame/contents_web_view.h
+@@ -62,6 +62,11 @@ class ContentsWebView : public views::WebView,
+   void RenderViewReady() override;
+   void OnLetterboxingChanged() override;
+   void SetWebContents(content::WebContents* web_contents) override;
++  void PrimaryPageChanged(content::Page& page) override;
++
++  // Whether the web contents are see-through, showing the glass frame behind
++  // them, see features::kGlassFrameTransparentWebUI.
++  bool is_transparent() const { return is_transparent_; }
+ 
+   // content::WebContentsObserver overrides:
+   // Overridden to track physical interactions (mouse/touch) on the WebContents.
+@@ -81,10 +86,12 @@ class ContentsWebView : public views::WebView,
+ 
+  private:
+   void UpdateBackgroundColor();
++  bool ShouldBeTransparent() const;
+   std::unique_ptr<StatusBubbleViews> status_bubble_;
+   std::unique_ptr<WebContentsCloseHandler> web_contents_close_handler_;
+ 
+   bool background_visible_ = true;
++  bool is_transparent_ = false;
+   bool is_animating_bounds_ = false;
+   bool use_default_deadline_when_animating_ = false;
+ 
+diff --git a/chrome/browser/ui/views/frame/glass_frame_service.cc b/chrome/browser/ui/views/frame/glass_frame_service.cc
+index a674a3969b..a1f1581d25 100644
+--- a/chrome/browser/ui/views/frame/glass_frame_service.cc
++++ b/chrome/browser/ui/views/frame/glass_frame_service.cc
+@@ -4,6 +4,8 @@
+ 
+ #include "chrome/browser/ui/views/frame/glass_frame_service.h"
+ 
++#include <algorithm>
++#include <array>
+ #include <memory>
+ #include <string>
+ #include <utility>
+@@ -13,6 +15,7 @@
+ #include "base/functional/bind.h"
+ #include "base/location.h"
+ #include "base/memory/raw_ptr.h"
++#include "base/metrics/field_trial_params.h"
+ #include "base/metrics/histogram_functions.h"
+ #include "base/time/time.h"
+ #include "base/timer/timer.h"
+@@ -43,12 +46,32 @@
+ #include "base/mac/mac_util.h"
+ #endif
+ 
++#if BUILDFLAG(IS_LINUX)
++#include "ui/ozone/public/ozone_platform.h"
++#endif
++
+ namespace {
+ 
+ // The interval at which the DailyEvent::CheckInterval function should be
+ // called.
+ constexpr base::TimeDelta kDailyEventIntervalTimeDelta = base::Minutes(30);
+ 
++bool g_ignore_platform_blur_support_for_testing = false;
++
++#if BUILDFLAG(IS_LINUX)
++// The compositor's blur is plain, without the brightening and vibrancy of the
++// macOS glass material, so the frame tint has to be lighter for the backdrop
++// to show through.
++BASE_FEATURE_PARAM(double,
++                   kGlassFrameLinuxTintOpacityLight,
++                   &features::kGlassFrame,
++                   0.35);
++BASE_FEATURE_PARAM(double,
++                   kGlassFrameLinuxTintOpacityDark,
++                   &features::kGlassFrame,
++                   0.45);
++#endif  // BUILDFLAG(IS_LINUX)
++
+ }  // namespace
+ 
+ class GlassFrameMetricsReporter {
+@@ -99,9 +122,9 @@ GlassFrameService* GlassFrameService::GetInstance() {
+ // static
+ void GlassFrameService::RegisterLocalStatePrefs(PrefRegistrySimple* registry) {
+   bool default_enabled = true;
+-#if defined(ARCH_CPU_X86_FAMILY)
++#if BUILDFLAG(IS_MAC) && defined(ARCH_CPU_X86_FAMILY)
+   default_enabled = false;
+-#endif  // defined (ARCH_CPU_X86_FAMILY)
++#endif  // BUILDFLAG(IS_MAC) && defined (ARCH_CPU_X86_FAMILY)
+   registry->RegisterBooleanPref(prefs::kGlassFrameEnabled, default_enabled);
+   metrics::DailyEvent::RegisterPref(registry, prefs::kGlassFrameDailySample);
+ }
+@@ -116,11 +139,11 @@ GlassFrameService::GlassFrameService(BrowserProcess& process)
+   CHECK(g_browser_process);
+   PrefService* const pref_service = g_browser_process->local_state();
+   CHECK(pref_service);
+-#if !defined(ARCH_CPU_X86_FAMILY)
++#if !(BUILDFLAG(IS_MAC) && defined(ARCH_CPU_X86_FAMILY))
+   pref_service->SetDefaultPrefValue(
+       prefs::kGlassFrameEnabled,
+       base::Value(features::kGlassFrameEnabledByDefault.Get()));
+-#endif  // !defined(ARCH_CPU_X86_FAMILY)
++#endif  // !(BUILDFLAG(IS_MAC) && defined(ARCH_CPU_X86_FAMILY))
+   is_glass_frame_enabled_ = pref_service->GetBoolean(prefs::kGlassFrameEnabled);
+   pref_change_registrar_.Init(pref_service);
+   pref_change_registrar_.Add(
+@@ -178,8 +201,63 @@ bool GlassFrameService::HasMultipleOpenProfiles() const {
+   return has_multiple_open_profiles_;
+ }
+ 
++// static
++double GlassFrameService::GetTintOpacity(bool is_dark_mode,
++                                         bool is_vertical_tabs,
++                                         bool are_multiple_profiles_open) {
++#if BUILDFLAG(IS_LINUX)
++  double opacity = is_dark_mode ? kGlassFrameLinuxTintOpacityDark.Get()
++                                : kGlassFrameLinuxTintOpacityLight.Get();
++  // Like on macOS, vertical tabs get a stronger tint in light mode.
++  if (is_vertical_tabs && !is_dark_mode) {
++    opacity += 0.1;
++  }
++#else
++  // Default opacities mapped by [is_vertical_tabs][is_dark_mode]:
++  // Values updated after discussion with UX.
++  static constexpr std::array<std::array<double, 2>, 2> kDefaultOpacities = {{
++      {0.55, 0.80},  // Horizontal: light, dark
++      {0.65, 0.80},  // Vertical: light, dark
++  }};
++
++  double opacity = kDefaultOpacities[is_vertical_tabs][is_dark_mode];
++#endif  // BUILDFLAG(IS_LINUX)
++  if (are_multiple_profiles_open) {
++    const double multiple_open_profiles_opacity_increase = 0.05;
++    opacity += multiple_open_profiles_opacity_increase;
++  }
++  return std::clamp(opacity, 0.0, 1.0);
++}
++
++void GlassFrameService::OnPlatformBlurSupportChanged() {
++  OnEligibleStateChanged();
++}
++
++// static
++base::AutoReset<bool> GlassFrameService::IgnorePlatformBlurSupportForTesting() {
++  return base::AutoReset<bool>(&g_ignore_platform_blur_support_for_testing,
++                               true);
++}
++
+ bool GlassFrameService::IsGlassFrameAllowed() {
+-  return is_glass_frame_enabled_ && !is_battery_saver_mode_active_;
++  return is_glass_frame_enabled_ && !is_battery_saver_mode_active_ &&
++         IsPlatformBlurSupported();
++}
++
++bool GlassFrameService::IsPlatformBlurSupported() const {
++  if (g_ignore_platform_blur_support_for_testing) {
++    return true;
++  }
++#if BUILDFLAG(IS_LINUX)
++  // The blur behind the frame is drawn by the compositor (via the Wayland
++  // ext-background-effect-v1 protocol), which may not support it or may have
++  // it turned off.
++  return ui::OzonePlatform::GetInstance()
++      ->GetPlatformRuntimeProperties()
++      .supports_background_blur;
++#else
++  return true;
++#endif
+ }
+ 
+ void GlassFrameService::OnBrowserCreated(BrowserWindowInterface* browser) {
+diff --git a/chrome/browser/ui/views/frame/glass_frame_service.h b/chrome/browser/ui/views/frame/glass_frame_service.h
+index 9ece88b87f..90793f5cfa 100644
+--- a/chrome/browser/ui/views/frame/glass_frame_service.h
++++ b/chrome/browser/ui/views/frame/glass_frame_service.h
+@@ -8,6 +8,7 @@
+ #include <map>
+ #include <memory>
+ 
++#include "base/auto_reset.h"
+ #include "base/callback_list.h"
+ #include "base/containers/flat_set.h"
+ #include "base/functional/callback.h"
+@@ -65,6 +66,21 @@ class GlassFrameService : public BrowserCollectionObserver,
+   // Returns true if more than one profile is currently loaded.
+   bool HasMultipleOpenProfiles() const;
+ 
++  // Returns the opacity of the frame-colored tint painted over the blurred
++  // backdrop of a glass frame.
++  static double GetTintOpacity(bool is_dark_mode,
++                               bool is_vertical_tabs,
++                               bool are_multiple_profiles_open);
++
++  // Called when the window system starts or stops being able to blur what is
++  // behind browser windows, which glass frames depend on.
++  void OnPlatformBlurSupportChanged();
++
++  // Makes the service behave as if the window system supports blur, for tests
++  // that run without a compositor that does.
++  [[nodiscard]] static base::AutoReset<bool>
++  IgnorePlatformBlurSupportForTesting();
++
+   explicit GlassFrameService(BrowserProcess& process);
+   ~GlassFrameService() override;
+ 
+@@ -94,6 +110,10 @@ class GlassFrameService : public BrowserCollectionObserver,
+   // frame. Returns false otherwise.
+   bool IsGlassFrameAllowed();
+ 
++  // Returns true if the window system can currently blur the content behind
++  // glass frames.
++  bool IsPlatformBlurSupported() const;
++
+   // Returns the set of BrowserWindowInterfaces that are eligible to display
+   // the glass frame. The returned set has at most `kMaxGlassWindows` elements.
+   base::flat_set<raw_ptr<BrowserWindowInterface>>
+diff --git a/chrome/browser/ui/views/frame/glass_frame_service_interactive_uitest.cc b/chrome/browser/ui/views/frame/glass_frame_service_interactive_uitest.cc
+index ae5c1963e6..358f7301e4 100644
+--- a/chrome/browser/ui/views/frame/glass_frame_service_interactive_uitest.cc
++++ b/chrome/browser/ui/views/frame/glass_frame_service_interactive_uitest.cc
+@@ -4,6 +4,7 @@
+ 
+ #include "chrome/browser/ui/views/frame/glass_frame_service.h"
+ 
++#include "base/auto_reset.h"
+ #include "base/callback_list.h"
+ #include "base/functional/bind.h"
+ #include "base/memory/raw_ptr.h"
+@@ -120,6 +121,9 @@ class GlassFrameServiceInteractiveTest : public InProcessBrowserTest {
+ 
+  private:
+   base::test::ScopedFeatureList scoped_feature_list_;
++  // Bots don't run a compositor that can blur behind windows.
++  base::AutoReset<bool> ignore_platform_blur_support_ =
++      GlassFrameService::IgnorePlatformBlurSupportForTesting();
+   ui::UserDataFactory::ScopedOverride glass_frame_service_override_;
+   base::CallbackListSubscription create_services_subscription_;
+ };
+@@ -415,12 +419,12 @@ IN_PROC_BROWSER_TEST_F(GlassFrameServiceInteractiveTest,
+   EXPECT_TRUE(GlassFrameEligibilityMatchesTabStrip(browser_window));
+ }
+ 
+-#if !BUILDFLAG(IS_MAC)
++#if !BUILDFLAG(IS_MAC) && !BUILDFLAG(IS_LINUX)
+ IN_PROC_BROWSER_TEST_F(GlassFrameServiceInteractiveTest,
+                        GetInstanceDoesNotConstructService) {
+   EXPECT_EQ(GlassFrameService::GetInstance(), nullptr);
+ }
+-#endif  // !BUILDFLAG(IS_MAC)
++#endif  // !BUILDFLAG(IS_MAC) && !BUILDFLAG(IS_LINUX)
+ 
+ IN_PROC_BROWSER_TEST_F(GlassFrameServiceInteractiveTest, BatterySaverMode) {
+   if (!features::IsGlassFrameEnabled()) {
+diff --git a/chrome/browser/ui/views/frame/layout/browser_view_tabbed_layout_impl.cc b/chrome/browser/ui/views/frame/layout/browser_view_tabbed_layout_impl.cc
+index 7764d4a472..72c442fc0a 100644
+--- a/chrome/browser/ui/views/frame/layout/browser_view_tabbed_layout_impl.cc
++++ b/chrome/browser/ui/views/frame/layout/browser_view_tabbed_layout_impl.cc
+@@ -38,6 +38,7 @@
+ #include "chrome/browser/ui/views/frame/multi_contents_view.h"
+ #include "chrome/browser/ui/views/frame/shadow_frame_view.h"
+ #include "chrome/browser/ui/views/frame/tab_strip_region_view.h"
++#include "chrome/browser/ui/views/frame/themed_background.h"
+ #include "chrome/browser/ui/views/frame/vertical_tab_strip_background_blur_backdrop.h"
+ #include "chrome/browser/ui/views/frame/vertical_tab_strip_region_view.h"
+ #include "chrome/browser/ui/views/infobars/infobar_container_view.h"
+@@ -1542,6 +1543,21 @@ void BrowserViewTabbedLayoutImpl::ConfigureTopContainerBackground(
+   }
+ 
+   background->SetCorners(corners);
++
++  // A translucent toolbar and bookmarks bar must not be backed by an opaque
++  // top container.
++  if (GetTopChromeOpacity() < 1.0f) {
++    background->SetVisible(false);
++  }
++}
++
++float BrowserViewTabbedLayoutImpl::GetTopChromeOpacity() const {
++  if (!in_glass_mode() || !layout_data_ ||
++      is_fullscreen(layout_data_->window_state)) {
++    return 1.0f;
++  }
++  return static_cast<float>(
++      std::clamp(features::kGlassFrameToolbarOpacity.Get(), 0.0, 1.0));
+ }
+ 
+ void BrowserViewTabbedLayoutImpl::OnLayoutParamsChanged(
+@@ -1864,6 +1880,19 @@ void BrowserViewTabbedLayoutImpl::DoPostLayoutVisualAdjustments(
+   }
+   toolbar_background->SetCorners(toolbar_corners);
+ 
++  // When the whole top chrome is glass, the toolbar and bookmarks bar are
++  // translucent too, and show the blurred backdrop like the tab strip does.
++  const float top_chrome_opacity = GetTopChromeOpacity();
++  toolbar_background->SetPrimaryColor(CustomCorners::ColorChoiceWithAlpha(
++      CustomCornersBackground::ToolbarTheme(), top_chrome_opacity));
++  if (views().bookmark_bar && views().bookmark_bar->background()) {
++    if (auto* const bookmark_bar_background =
++            views().bookmark_bar->background()->AsA<ThemedBackground>()) {
++      bookmark_bar_background->SetOpacity(top_chrome_opacity);
++      views().bookmark_bar->SchedulePaint();
++    }
++  }
++
+   auto* const top_container_background =
+       views().top_container->background()->AsA<CustomCornersBackground>();
+   CHECK(top_container_background)
+diff --git a/chrome/browser/ui/views/frame/layout/browser_view_tabbed_layout_impl.h b/chrome/browser/ui/views/frame/layout/browser_view_tabbed_layout_impl.h
+index 462a89218b..b704d2f433 100644
+--- a/chrome/browser/ui/views/frame/layout/browser_view_tabbed_layout_impl.h
++++ b/chrome/browser/ui/views/frame/layout/browser_view_tabbed_layout_impl.h
+@@ -49,6 +49,10 @@ class BrowserViewTabbedLayoutImpl : public BrowserViewLayoutImpl {
+   void DoPostLayoutCleanup() override;
+ 
+  private:
++  // Returns the opacity of the toolbar and bookmarks bar backgrounds: below 1
++  // when the whole top chrome is glass.
++  float GetTopChromeOpacity() const;
++
+   struct HorizontalLayout;
+   struct SeparatorInfo;
+   struct SidePanelContentAnimation;
+diff --git a/chrome/browser/ui/views/frame/opaque_browser_frame_view.h b/chrome/browser/ui/views/frame/opaque_browser_frame_view.h
+index a553901ea7..94a735299f 100644
+--- a/chrome/browser/ui/views/frame/opaque_browser_frame_view.h
++++ b/chrome/browser/ui/views/frame/opaque_browser_frame_view.h
+@@ -131,7 +131,7 @@ class OpaqueBrowserFrameView : public BrowserFrameView,
+   // also paint the background of the titlebar area, since the top frame border
+   // and titlebar background are a contiguous component.
+   virtual void PaintRestoredFrameBorder(gfx::Canvas* canvas) const;
+-  void PaintMaximizedFrameBorder(gfx::Canvas* canvas) const;
++  virtual void PaintMaximizedFrameBorder(gfx::Canvas* canvas) const;
+   void PaintClientEdge(gfx::Canvas* canvas) const;
+ 
+   // Adds the app icon bounds to `params` if the icon is present.
+diff --git a/chrome/browser/ui/views/frame/themed_background.cc b/chrome/browser/ui/views/frame/themed_background.cc
+index 169aee34fb..1d6e4123af 100644
+--- a/chrome/browser/ui/views/frame/themed_background.cc
++++ b/chrome/browser/ui/views/frame/themed_background.cc
+@@ -6,6 +6,7 @@
+ 
+ #include <optional>
+ 
++#include "base/numerics/safe_conversions.h"
+ #include "chrome/browser/themes/theme_properties.h"
+ #include "chrome/browser/ui/color/chrome_color_id.h"
+ #include "chrome/browser/ui/views/frame/browser_view.h"
+@@ -47,11 +48,20 @@ std::pair<int, ui::ColorId> GetThemeChoiceInfo(
+ 
+ }  // namespace
+ 
++DEFINE_SAFE_CAST_TARGET(ThemedBackground)
++
+ ThemedBackground::ThemedBackground(BrowserView* browser_view,
+                                    ThemeChoice theme_choice)
+     : browser_view_(browser_view), theme_choice_(theme_choice) {}
+ 
+ void ThemedBackground::Paint(gfx::Canvas* canvas, views::View* view) const {
++  if (opacity_ < 1.0f) {
++    const SkColor color = view->GetColorProvider()->GetColor(
++        GetThemeChoiceInfo(theme_choice_, view).second);
++    canvas->DrawColor(SkColorSetA(
++        color, base::ClampRound<SkAlpha>(opacity_ * SkColorGetA(color))));
++    return;
++  }
+   PaintBackground(canvas, view, browser_view_, theme_choice_);
+ }
+ 
+diff --git a/chrome/browser/ui/views/frame/themed_background.h b/chrome/browser/ui/views/frame/themed_background.h
+index 66b5ec2944..cae77751dc 100644
+--- a/chrome/browser/ui/views/frame/themed_background.h
++++ b/chrome/browser/ui/views/frame/themed_background.h
+@@ -19,6 +19,8 @@ class BrowserView;
+ // there is a background image, it will be painted or tiled appropriately.
+ class ThemedBackground : public views::Background {
+  public:
++  DECLARE_SAFE_CAST_TARGET()
++
+   enum ThemeChoice { kToolbarTheme, kFrameTheme };
+   // Construct a themed background for the specified browser.
+   explicit ThemedBackground(BrowserView* browser_view,
+@@ -84,12 +86,18 @@ class ThemedBackground : public views::Background {
+ 
+   ThemeChoice GetThemeChoice() { return theme_choice_; }
+ 
++  // Sets the opacity of the background color, e.g. for translucent glass
++  // frames. Theme custom images are not painted while translucent; glass
++  // frames are not shown with them anyway.
++  void SetOpacity(float opacity) { opacity_ = opacity; }
++
+  private:
+   // views::Background:
+   void Paint(gfx::Canvas* canvas, views::View* view) const override;
+ 
+   const raw_ptr<BrowserView> browser_view_;
+   ThemeChoice theme_choice_;
++  float opacity_ = 1.0f;
+ };
+ 
+ #endif  // CHROME_BROWSER_UI_VIEWS_FRAME_THEMED_BACKGROUND_H_
+diff --git a/chrome/browser/ui/views/tabs/common/horizontal_tab_style_views.cc b/chrome/browser/ui/views/tabs/common/horizontal_tab_style_views.cc
+index 5e8bf7705c..6dbfa3fe40 100644
+--- a/chrome/browser/ui/views/tabs/common/horizontal_tab_style_views.cc
++++ b/chrome/browser/ui/views/tabs/common/horizontal_tab_style_views.cc
+@@ -785,11 +785,26 @@ void HorizontalTabStyleViews::PaintTabBackgroundFill(
+ 
+   canvas->ClipPath(fill_path, true);
+ 
++  const SkColor background_color =
++      GetCurrentTabBackgroundColor(selection_state, false);
++  if (SkColorGetA(background_color) != SK_AlphaOPAQUE) {
++    // The bottom of the tab strip overlaps the toolbar. When both are
++    // translucent (glass frames), painting that overlap twice shows as a
++    // line, so leave it to the toolbar.
++    const gfx::Rect bounds_px = gfx::ScaleToEnclosingRect(
++        delegate_->GetView()->GetLocalBounds(), scale);
++    const int overlap_px = base::ClampRound(
++        GetLayoutConstant(LayoutConstant::kTabstripToolbarOverlap) * scale);
++    canvas->ClipRect(gfx::Rect(bounds_px.x(), bounds_px.bottom() - overlap_px,
++                               bounds_px.width(), overlap_px),
++                     SkClipOp::kDifference);
++  }
++
+   if (ShouldPaintTabBackgroundColor(selection_state, fill_id.has_value())) {
+     cc::PaintFlags flags;
+     flags.setAntiAlias(true);
+ 
+-    flags.setColor(GetCurrentTabBackgroundColor(selection_state, false));
++    flags.setColor(background_color);
+     canvas->DrawRect(gfx::ScaleToEnclosingRect(
+                          delegate_->GetView()->GetLocalBounds(), scale),
+                      flags);
+diff --git a/ui/base/ui_base_features.cc b/ui/base/ui_base_features.cc
+index 3ee35e743d..0097e5d428 100644
+--- a/ui/base/ui_base_features.cc
++++ b/ui/base/ui_base_features.cc
+@@ -521,6 +521,35 @@ BASE_FEATURE(kDesktopGlowUp, base::FEATURE_DISABLED_BY_DEFAULT);
+ BASE_FEATURE(kGlassFrame, base::FEATURE_DISABLED_BY_DEFAULT);
+ BASE_FEATURE_PARAM(bool, kGlassExpandOnHoverEnabled, &kGlassFrame, true);
+ BASE_FEATURE_PARAM(bool, kGlassFrameEnabledByDefault, &kGlassFrame, true);
++#if BUILDFLAG(IS_LINUX)
++// Matches how desktops with blur (e.g. COSMIC) frost entire window
++// backgrounds: the toolbar is only a slightly lighter part of the glass.
++constexpr double kDefaultGlassFrameToolbarOpacity = 0.2;
++// Menus float over arbitrary page content, so they need more opacity to stay
++// readable.
++constexpr double kDefaultGlassFrameMenuOpacity = 0.7;
++constexpr bool kDefaultGlassFrameTransparentWebUI = true;
++#else
++constexpr double kDefaultGlassFrameToolbarOpacity = 1.0;
++constexpr double kDefaultGlassFrameMenuOpacity = 1.0;
++constexpr bool kDefaultGlassFrameTransparentWebUI = false;
++#endif
++BASE_FEATURE_PARAM(double,
++                   kGlassFrameToolbarOpacity,
++                   &kGlassFrame,
++                   kDefaultGlassFrameToolbarOpacity);
++BASE_FEATURE_PARAM(double,
++                   kGlassFrameMenuOpacity,
++                   &kGlassFrame,
++                   kDefaultGlassFrameMenuOpacity);
++BASE_FEATURE_PARAM(bool,
++                   kGlassFrameTransparentWebUI,
++                   &kGlassFrame,
++                   kDefaultGlassFrameTransparentWebUI);
++BASE_FEATURE_PARAM(bool,
++                   kGlassFrameTransparentWebContents,
++                   &kGlassFrame,
++                   false);
+ 
+ BASE_FEATURE(kRoundedIcons, base::FEATURE_DISABLED_BY_DEFAULT);
+ BASE_FEATURE(kWebUIRoundedIcons, base::FEATURE_DISABLED_BY_DEFAULT);
+@@ -548,6 +577,11 @@ bool IsGlassFrameEnabled() {
+ #if BUILDFLAG(IS_MAC)
+   return base::mac::MacOSMajorVersion() >= 26 &&
+          base::FeatureList::IsEnabled(kGlassFrame);
++#elif BUILDFLAG(IS_LINUX)
++  // On Linux the blur is provided by the Wayland compositor, and whether it
++  // can do that is only known at runtime. GlassFrameService checks it before
++  // making any window eligible.
++  return base::FeatureList::IsEnabled(kGlassFrame);
+ #else
+   return false;
+ #endif
+diff --git a/ui/base/ui_base_features.h b/ui/base/ui_base_features.h
+index da93c9ce93..d8c895207c 100644
+--- a/ui/base/ui_base_features.h
++++ b/ui/base/ui_base_features.h
+@@ -340,6 +340,21 @@ COMPONENT_EXPORT(UI_BASE_FEATURES)
+ BASE_DECLARE_FEATURE_PARAM(bool, kGlassExpandOnHoverEnabled);
+ COMPONENT_EXPORT(UI_BASE_FEATURES)
+ BASE_DECLARE_FEATURE_PARAM(bool, kGlassFrameEnabledByDefault);
++// Opacity of the toolbar and bookmarks bar backgrounds in glass mode. Below 1,
++// the whole top chrome, not just the tab strip, shows the blurred backdrop.
++COMPONENT_EXPORT(UI_BASE_FEATURES)
++BASE_DECLARE_FEATURE_PARAM(double, kGlassFrameToolbarOpacity);
++// Opacity of the background of menus opened from glass windows. Below 1, the
++// menus show a blurred backdrop too.
++COMPONENT_EXPORT(UI_BASE_FEATURES)
++BASE_DECLARE_FEATURE_PARAM(double, kGlassFrameMenuOpacity);
++// With a translucent toolbar: whether chrome:// pages (settings, history, the
++// new tab page, ...) are see-through too, and whether all pages are. Pages
++// that paint their own background stay opaque.
++COMPONENT_EXPORT(UI_BASE_FEATURES)
++BASE_DECLARE_FEATURE_PARAM(bool, kGlassFrameTransparentWebUI);
++COMPONENT_EXPORT(UI_BASE_FEATURES)
++BASE_DECLARE_FEATURE_PARAM(bool, kGlassFrameTransparentWebContents);
+ COMPONENT_EXPORT(UI_BASE_FEATURES)
+ BASE_DECLARE_FEATURE(kRoundedIcons);
+ COMPONENT_EXPORT(UI_BASE_FEATURES)
+-- 
+2.43.0
+
