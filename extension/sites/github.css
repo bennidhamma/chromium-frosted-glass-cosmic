@@ -1,0 +1,31 @@
+/* GitHub
+ *
+ * GitHub's design system (Primer) defines its theme colors as CSS variables
+ * on <html>. Copy them there, then redefine them below it as translucent
+ * versions of themselves. That covers every theme GitHub has: light, dark,
+ * dimmed, high contrast, colorblind. Menus and dialogs use
+ * --overlay-bgColor, which stays opaque since they float over content. */
+html {
+  --frost-github-default: var(--bgColor-default);
+  --frost-github-muted: var(--bgColor-muted);
+  --frost-github-inset: var(--bgColor-inset);
+  --frost-github-card: var(--card-bgColor);
+  --frost-github-page-header: var(--page-header-bgColor);
+}
+
+body {
+  --bgColor-default: color-mix(in srgb, var(--frost-github-default) calc(var(--frost-alpha-page) * 100%), transparent) !important;
+  --bgColor-muted: color-mix(in srgb, var(--frost-github-muted) calc(var(--frost-alpha-surface) * 100%), transparent) !important;
+  --bgColor-inset: color-mix(in srgb, var(--frost-github-inset) calc(var(--frost-alpha-surface) * 100%), transparent) !important;
+  --card-bgColor: color-mix(in srgb, var(--frost-github-card) calc(var(--frost-alpha-surface) * 100%), transparent) !important;
+  --page-header-bgColor: color-mix(in srgb, var(--frost-github-page-header) calc(var(--frost-alpha-surface) * 100%), transparent) !important;
+}
+
+/* Sticky headers stay in place while the page scrolls under them, so they
+   keep GitHub's opaque colors. (backdrop-filter can't hide what's under them
+   on a see-through page: the blurred copy is drawn over the original.) */
+:is([class*="stickyheader" i], [class*="is-stuck"], .gh-header-sticky, .sticky-file-header) {
+  --bgColor-default: var(--frost-github-default) !important;
+  --bgColor-muted: var(--frost-github-muted) !important;
+  --bgColor-inset: var(--frost-github-inset) !important;
+}

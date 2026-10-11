@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">
+  <!-- Source for the PNG icons; render with tools/render-icons.mjs. -->
+  <defs>
+    <linearGradient id="desktop" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#ff7ab6"/>
+      <stop offset="0.5" stop-color="#7b6cf6"/>
+      <stop offset="1" stop-color="#2ec4b6"/>
+    </linearGradient>
+    <linearGradient id="glass" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#fff" stop-opacity="0.75"/>
+      <stop offset="1" stop-color="#fff" stop-opacity="0.45"/>
+    </linearGradient>
+  </defs>
+  <rect x="4" y="4" width="120" height="120" rx="28" fill="url(#desktop)"/>
+  <circle cx="40" cy="42" r="22" fill="#ffd166"/>
+  <rect x="30" y="30" width="80" height="80" rx="18" fill="url(#glass)" stroke="#fff" stroke-opacity="0.9" stroke-width="4"/>
+  <rect x="44" y="48" width="44" height="8" rx="4" fill="#3a3f8f" fill-opacity="0.55"/>
+  <rect x="44" y="64" width="30" height="8" rx="4" fill="#3a3f8f" fill-opacity="0.35"/>
+</svg>

@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Frosted Glass Sites</title>
+<link rel="stylesheet" href="popup.css">
+<script type="module" src="popup.js"></script>
+</head>
+<body>
+  <header>
+    <img src="../icons/32.png" width="20" height="20" alt="">
+    <h1>Frosted Glass Sites</h1>
+  </header>
+
+  <ul id="sites"></ul>
+
+  <p id="request" hidden>
+    <span id="request-host"></span> isn't in the list yet.
+    <a id="request-link" target="_blank">Request it</a>
+  </p>
+
+  <footer>
+    <p>Turning a site on asks for access to it. Pages are see-through in
+      Chromium Frosted Glass; elsewhere they look as usual.</p>
+    <a id="contribute" target="_blank">Add or improve a site</a>
+  </footer>
+
+  <template id="site">
+    <li>
+      <label>
+        <span class="name"></span>
+        <span class="badges"></span>
+        <input type="checkbox" role="switch">
+      </label>
+      <span class="hosts"></span>
+      <span class="note" hidden>Reload open tabs to finish turning it off.</span>
+    </li>
+  </template>
+</body>
+</html>
