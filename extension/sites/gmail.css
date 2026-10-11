@@ -1,0 +1,9 @@
+/* Gmail. Experimental: not yet checked on the live site.
+ *
+ * Gmail's class names are generated, change over time and aren't documented,
+ * so this only clears the page background behind Gmail's panels. The inbox,
+ * sidebar and menus keep their colors until someone tunes this on a live
+ * inbox: see the extension's README. */
+body {
+  background-color: transparent !important;
+}

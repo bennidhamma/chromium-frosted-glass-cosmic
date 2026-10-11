@@ -1,0 +1,16 @@
+/* Claude (claude.ai). Experimental: not yet checked on the live site.
+ *
+ * Claude's backgrounds are Tailwind classes like bg-bg-100, colored by
+ * variables like --bg-100 that hold HSL components ("48 33% 97%"), with the
+ * dark theme redefining the variables. The page (bg-100) and sidebar
+ * (bg-200) become translucent. bg-000 (the message box, menus) and bg-300
+ * (messages) keep their colors, and so does anything that floats over the
+ * page: content would show through it. */
+body,
+.bg-bg-100:not(.fixed, .absolute, .sticky, [role="dialog"] *, [role="menu"] *, [data-radix-popper-content-wrapper] *) {
+  background-color: hsl(var(--bg-100) / var(--frost-alpha-page)) !important;
+}
+
+.bg-bg-200:not(.fixed, .absolute, .sticky, [role="dialog"] *, [role="menu"] *, [data-radix-popper-content-wrapper] *) {
+  background-color: hsl(var(--bg-200) / var(--frost-alpha-surface)) !important;
+}

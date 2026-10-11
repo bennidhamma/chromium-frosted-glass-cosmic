@@ -21,7 +21,9 @@ that implement the protocol should work too.
 - **See-through `chrome://` pages.** Settings, history, downloads, extensions and
   the new tab page show the frosted desktop behind semi-opaque cards.
 - **Frosted web pages, opt-in.** A web page can ask to be see-through too; see
-  [Frosted pages](#frosted-pages-for-web-developers). All other sites stay opaque.
+  [Frosted pages](#frosted-pages-for-web-developers). All other sites stay opaque,
+  unless you turn them on with the [Frosted Glass Sites](#frosted-glass-sites)
+  extension.
 - Every window is frosted. Glass builds on Chrome's [Glass Frame][glass-frame]
   and, like it, turns off in fullscreen, with battery saver, or with an extension
   theme. It can be turned off in *Settings → Appearance → Tab styling*.
@@ -112,6 +114,18 @@ color, and don't paint a background on the root:
   normal background. Add
   `color-scheme: dark` (or light) so that fallback matches your design.
 - Users can turn the opt-in off with `GlassFrameTransparentWebContentsOptIn/false`.
+
+## Frosted Glass Sites
+
+Most sites don't opt in themselves. The [Frosted Glass Sites](extension/)
+extension does it for them: GitHub, Google Search, Claude and Gmail so far, each
+with a small stylesheet that turns the site's backgrounds translucent. You turn
+sites on one at a time from its toolbar button, and it only gets access to the
+sites you turn on.
+
+Site styles are contributed by pull request, and checked so they can only
+restyle the page. See [`extension/README.md`](extension/README.md) to install
+it, or to add or improve a site.
 
 ## COSMIC's blur offset
 

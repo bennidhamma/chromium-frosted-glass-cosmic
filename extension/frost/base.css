@@ -1,0 +1,19 @@
+/* Shared by every site, ahead of the site's own stylesheet.
+ *
+ * In Chromium Frosted Glass the page is drawn over the frosted desktop. Site
+ * styles make the site's backgrounds translucent instead of opaque, keeping
+ * some of the site's own color so text stays readable on any wallpaper. These
+ * set how much: 1 is opaque, 0 is clear glass. */
+:root {
+  /* The page background, which text sits on directly. */
+  --frost-alpha-page: 0.55;
+  /* Panels on top of the page: sidebars, headers, cards. They stack on the
+     page background, so they end up more opaque than it. */
+  --frost-alpha-surface: 0.5;
+}
+
+/* Never paint over the desktop on the root. A body background still covers
+   the whole window: it moves to the canvas when the root has none. */
+html {
+  background: transparent !important;
+}

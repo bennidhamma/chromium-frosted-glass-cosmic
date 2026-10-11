@@ -1,0 +1,49 @@
+name: Extension
+
+on:
+  pull_request:
+    paths:
+      - 'extension/**'
+      - '.github/workflows/extension.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'extension/**'
+      - '.github/workflows/extension.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      # A pull request is also checked by the checker on the branch it merges
+      # into, so it can't relax the rules it is checked against.
+      - name: Check out the base branch's checker
+        if: github.event_name == 'pull_request'
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.base_ref }}
+          path: base
+          sparse-checkout: extension/tools
+          persist-credentials: false
+
+      - name: Check
+        run: |
+          node extension/tools/check.mjs extension
+          if [ -f base/extension/tools/check.mjs ]; then
+            node base/extension/tools/check.mjs extension
+          fi
+
+      - name: Package
+        run: cd extension && zip -r ../frosted-glass-sites.zip . -x 'tools/*'
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: frosted-glass-sites
+          path: frosted-glass-sites.zip

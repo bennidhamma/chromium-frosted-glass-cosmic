@@ -1,0 +1,22 @@
+name: Site request
+description: Ask for a site to get frosted glass in the Frosted Glass Sites extension.
+title: "Site request: "
+labels: ["site request"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        If the site is already requested, give that issue a 👍 instead: the most wanted sites get styled first. You can also write the style yourself, see [Adding or improving a site](https://github.com/bennidhamma/chromium-frosted-glass-cosmic/tree/main/extension#adding-or-improving-a-site).
+  - type: input
+    id: site
+    attributes:
+      label: Site
+      description: Only the host. Don't paste links to private pages.
+      placeholder: example.com
+    validations:
+      required: true
+  - type: textarea
+    id: notes
+    attributes:
+      label: Notes
+      description: The pages you use most, whether you use its light or dark theme, anything that should stay opaque.

@@ -1,0 +1,158 @@
+:root {
+  color-scheme: light dark;
+  --fg: #1f2328;
+  --muted: #59636e;
+  --bg: #ffffff;
+  --row: #f3f4f6;
+  --accent: #3b6fd8;
+  --badge: #9a6700;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --fg: #e6e8eb;
+    --muted: #9198a1;
+    --bg: #1f2125;
+    --row: #2a2d32;
+    --accent: #7fa7ff;
+    --badge: #d29922;
+  }
+}
+
+[hidden] {
+  display: none !important;
+}
+
+/* On body: Chrome styles extension pages' body with a smaller font. */
+body {
+  width: 320px;
+  margin: 0;
+  font: 13px/1.4 system-ui, sans-serif;
+  padding: 12px;
+  color: var(--fg);
+  background: var(--bg);
+}
+
+header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+h1 {
+  margin: 0;
+  font-size: 15px;
+}
+
+ul {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+li {
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: var(--row);
+}
+
+li.current {
+  outline: 2px solid var(--accent);
+}
+
+label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+}
+
+.name {
+  font-weight: 600;
+}
+
+.badges {
+  flex: 1;
+  display: flex;
+  gap: 4px;
+}
+
+.badge {
+  padding: 0 6px;
+  border: 1px solid currentColor;
+  border-radius: 999px;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.badge.experimental {
+  color: var(--badge);
+}
+
+.hosts,
+.note {
+  display: block;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.note {
+  margin-top: 2px;
+  color: var(--badge);
+}
+
+/* A switch. */
+input[role="switch"] {
+  appearance: none;
+  position: relative;
+  width: 32px;
+  height: 18px;
+  margin: 0;
+  border-radius: 999px;
+  background: var(--muted);
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+input[role="switch"]::before {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: #fff;
+  transition: transform 0.15s;
+}
+
+input[role="switch"]:checked {
+  background: var(--accent);
+}
+
+input[role="switch"]:checked::before {
+  transform: translateX(14px);
+}
+
+input[role="switch"]:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+#request,
+footer {
+  margin: 10px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+footer p {
+  margin: 0 0 4px;
+}
+
+a {
+  color: var(--accent);
+}
