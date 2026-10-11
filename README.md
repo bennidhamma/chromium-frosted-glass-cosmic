@@ -19,11 +19,13 @@ that implement the protocol should work too.
 - **Frosted menus.** The app menu, context menus and bookmark menus blur what is
   behind them.
 - **See-through `chrome://` pages.** Settings, history, downloads, extensions and
-  the new tab page show the frosted desktop behind semi-opaque cards.
+  the new tab page show the frosted desktop behind semi-opaque cards. Other
+  `chrome://` pages stay opaque.
 - **Frosted web pages, opt-in.** A web page can ask to be see-through too; see
   [Frosted pages](#frosted-pages-for-web-developers). All other sites stay opaque,
-  unless you turn them on with the [Frosted Glass Sites](#frosted-glass-sites)
-  extension.
+  unless you turn them on with the preinstalled
+  [Frosted Glass Sites](#frosted-glass-sites) extension (Claude and Gmail so
+  far).
 - **Follows COSMIC's frosted glass settings.** *Frost thickness* and *Glass
   opacity* in *Settings → Desktop → Appearance* make the browser more or less
   see-through along with COSMIC's own windows, live.
@@ -121,8 +123,9 @@ color, and don't paint a background on the root:
 ## Frosted Glass Sites
 
 Most sites don't opt in themselves. The [Frosted Glass Sites](extension/)
-extension does it for them: GitHub, Google Search, Claude and Gmail so far, each
-with a small stylesheet that turns the site's backgrounds translucent. You turn
+extension does it for them: Claude and Gmail so far, each with a small
+stylesheet that frosts the site's background and keeps its main areas on
+opaque cards. You turn
 sites on one at a time from its toolbar button, and it only gets access to the
 sites you turn on.
 

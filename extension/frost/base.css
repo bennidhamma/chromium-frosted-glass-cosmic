@@ -1,14 +1,15 @@
 /* Shared by every site, ahead of the site's own stylesheet.
  *
  * In Chromium Frosted Glass the page is drawn over the frosted desktop. Site
- * styles make the site's backgrounds translucent instead of opaque, keeping
- * some of the site's own color so text stays readable on any wallpaper. These
- * set how much: 1 is opaque, 0 is clear glass. */
+ * styles lay sites out like COSMIC windows: the page background, headers and
+ * margins become frosted glass, and the areas people read and work in stay
+ * opaque, as cards. */
 :root {
-  /* The page background, which text sits on directly. */
+  /* How much of the site's page color stays in the glass: 1 is opaque, 0 is
+     clear. Some is needed for text on the glass to stay readable. */
   --frost-alpha-page: 0.55;
-  /* Panels on top of the page: sidebars, headers, cards. They stack on the
-     page background, so they end up more opaque than it. */
+  /* Panels on top of the page that are part of the glass rather than cards.
+     They stack on the page background, so they end up more opaque than it. */
   --frost-alpha-surface: 0.5;
 }
 

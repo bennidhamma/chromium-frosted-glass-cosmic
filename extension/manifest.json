@@ -1,10 +1,11 @@
 {
   "manifest_version": 3,
   "name": "Frosted Glass Sites",
-  "version": "0.1.0",
-  "description": "Frosted glass backgrounds for GitHub, Gmail, Google Search, Claude and more, in Chromium Frosted Glass.",
+  "version": "0.2.0",
+  "description": "Frosted glass backgrounds for Claude and Gmail, in Chromium Frosted Glass.",
   "homepage_url": "https://github.com/bennidhamma/chromium-frosted-glass-cosmic",
   "minimum_chrome_version": "111",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA0lpxmUFv19LDaSvLak2YJIp1FSkTM/Dlt9aSSwhf0Rx+wcmFI5hONlvQ7bHnAJSTCAhfFTI5MYKAsKlh0Kg8qQf6GCQx6rCwiBNE+sTxQEaNA0ty+cgSXwJY0fEholWiFynpUp3hIpKsbmpM5Pgnn/LJuFCl8vDHKt0QngqrTaVRORV9yq2Pi01Dn7/38LI17Tcbh8joP8LqduPtSShIjzmEBqZqVi70oORBdDIqZQDlDcdv/U+wTGrGst0PEWJYignvFUdBJWOm3xLJD2aON35FV8eB+pUVT2BSmtobVmyBChE5ezD1bXLtfPOD+5buyPgIlfFg7fmnnY1EspglawIDAQAB",
   "icons": {
     "16": "icons/16.png",
     "32": "icons/32.png",
@@ -26,9 +27,6 @@
   "permissions": ["activeTab", "scripting"],
   "optional_host_permissions": [
     "https://claude.ai/*",
-    "https://gist.github.com/*",
-    "https://github.com/*",
-    "https://mail.google.com/*",
-    "https://www.google.com/*"
+    "https://mail.google.com/*"
   ]
 }

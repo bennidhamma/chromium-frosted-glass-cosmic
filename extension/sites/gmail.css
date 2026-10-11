@@ -1,9 +1,46 @@
-/* Gmail. Experimental: not yet checked on the live site.
+/* Gmail (mail.google.com).
  *
- * Gmail's class names are generated, change over time and aren't documented,
- * so this only clears the page background behind Gmail's panels. The inbox,
- * sidebar and menus keep their colors until someone tunes this on a live
- * inbox: see the extension's README. */
+ * Laid out like a COSMIC window: the mail list and open messages stay on
+ * Gmail's own opaque card, the folder and label list gets a card of its own,
+ * and the rest turns to frosted glass: behind the header, the app rail and
+ * the side panel.
+ *
+ * Gmail paints its backgrounds with fixed colors on generated class names,
+ * which its themes swap. So instead of those colors, the frost and the card
+ * are colored from Gmail's text color, inverted: white behind dark text in
+ * light themes, matching the mail list's card, and dark gray behind light
+ * text in dark ones. When the text is as dark as the glass
+ * behind the window (dark text on a dark desktop's glass) or as light, the
+ * tint gets stronger, so the text stays readable. Menus, dialogs, the compose
+ * window and the search box keep their colors. */
+
 body {
+  background-color: transparent !important;
+}
+
+/* The page background, behind everything. r, g and b are the text's color. */
+.wl {
+  background-color: rgb(from currentColor calc(255 - max(0, r - 48) * 1.232) calc(255 - max(0, g - 48) * 1.232) calc(255 - max(0, b - 48) * 1.232) / calc(var(--frost-alpha-page) + 0.3 * r / 255)) !important;
+}
+
+@media (prefers-color-scheme: dark) {
+  .wl {
+    background-color: rgb(from currentColor calc(255 - max(0, r - 48) * 1.232) calc(255 - max(0, g - 48) * 1.232) calc(255 - max(0, b - 48) * 1.232) / calc(var(--frost-alpha-page) + 0.3 * (1 - r / 255))) !important;
+  }
+}
+
+/* The folder and label list, with the compose button, as a card like the
+   mail list's, with the same gaps around it. */
+.bkL > .aqn {
+  margin: 0 8px 16px 0 !important;
+  background-color: rgb(from currentColor calc(255 - max(0, r - 48) * 1.232) calc(255 - max(0, g - 48) * 1.232) calc(255 - max(0, b - 48) * 1.232)) !important;
+  border-radius: 16px;
+}
+
+/* The navigation rail, the box it draws above itself behind the menu button,
+   and the side panel of Calendar, Keep and Tasks. */
+.bkL > [role="navigation"].aeN,
+.bkL > [role="navigation"].aeN::before,
+[role="complementary"].brC-aT5-aOt-Jw {
   background-color: transparent !important;
 }

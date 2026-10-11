@@ -1,16 +1,41 @@
-/* Claude (claude.ai). Experimental: not yet checked on the live site.
+/* Claude (claude.ai).
  *
- * Claude's backgrounds are Tailwind classes like bg-bg-100, colored by
- * variables like --bg-100 that hold HSL components ("48 33% 97%"), with the
- * dark theme redefining the variables. The page (bg-100) and sidebar
- * (bg-200) become translucent. bg-000 (the message box, menus) and bg-300
- * (messages) keep their colors, and so does anything that floats over the
- * page: content would show through it. */
-body,
-.bg-bg-100:not(.fixed, .absolute, .sticky, [role="dialog"] *, [role="menu"] *, [data-radix-popper-content-wrapper] *) {
-  background-color: hsl(var(--bg-100) / var(--frost-alpha-page)) !important;
+ * The app is laid out by a frame (.dframe-root): a background filling the
+ * window (.dframe-content, colored by --df-bg-page), the sidebar floating
+ * over its left edge, and the conversation and other panes (.dframe-pane)
+ * inside an 8px gutter. The background turns to frosted glass. The sidebar
+ * and the panes keep their opaque colors, shaped as cards with the frost
+ * showing around them. */
+body:has(.dframe-root) {
+  background-color: transparent !important;
 }
 
-.bg-bg-200:not(.fixed, .absolute, .sticky, [role="dialog"] *, [role="menu"] *, [data-radix-popper-content-wrapper] *) {
-  background-color: hsl(var(--bg-200) / var(--frost-alpha-surface)) !important;
+.dframe-root .dframe-content {
+  background: color-mix(in srgb, var(--df-bg-page, var(--cds-surface-1)) calc(var(--frost-alpha-page) * 100%), transparent) !important;
+}
+
+/* The grid drawn behind the new chat page fills the window with its own
+   background; keep only its lines. */
+.dframe-content [class~="pointer-events-none"][class~="inset-0"].bg-surface-1 {
+  background-color: transparent !important;
+}
+
+.dframe-root .dframe-pane {
+  background: var(--df-bg-page, var(--cds-surface-1)) !important;
+  border-radius: 12px;
+  margin-block: 8px !important;
+}
+
+/* On the web, the sidebar fills the window's left edge. Inset it like the
+   panes, with the frame's own offset, which moves the panes along. */
+.dframe-root:not([data-collapsed]) {
+  --df-sidebar-left: 8px !important;
+}
+
+.dframe-root:not([data-collapsed]) .dframe-sidebar {
+  top: 8px !important;
+  bottom: 8px !important;
+  height: auto !important;
+  border-right: none !important;
+  border-radius: 12px !important;
 }

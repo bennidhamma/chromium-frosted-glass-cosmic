@@ -3,30 +3,12 @@
     {
       "id": "claude",
       "name": "Claude",
-      "matches": ["https://claude.ai/*"],
-      "experimental": true
-    },
-    {
-      "id": "github",
-      "name": "GitHub",
-      "matches": ["https://github.com/*", "https://gist.github.com/*"]
+      "matches": ["https://claude.ai/*"]
     },
     {
       "id": "gmail",
       "name": "Gmail",
-      "matches": ["https://mail.google.com/*"],
-      "experimental": true
-    },
-    {
-      "id": "google-search",
-      "name": "Google Search",
-      "matches": [
-        "https://www.google.com/",
-        "https://www.google.com/?*",
-        "https://www.google.com/search*",
-        "https://www.google.com/webhp*"
-      ],
-      "experimental": true
+      "matches": ["https://mail.google.com/*"]
     }
   ]
 }

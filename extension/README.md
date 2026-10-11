@@ -1,8 +1,9 @@
 # Frosted Glass Sites
 
-A browser extension that turns on frosted glass for sites like GitHub, Google
-Search, Claude and Gmail in [Chromium Frosted Glass](../README.md). The page's
-background becomes the frosted desktop, with the site's panels and cards on top.
+A browser extension that turns on frosted glass for sites like Claude and
+Gmail in [Chromium Frosted Glass](../README.md). Sites are laid out
+like COSMIC windows: the frosted desktop shows behind their headers and margins,
+and the areas you read and work in stay on opaque cards.
 
 Sites only take part in [frosted pages](../README.md#frosted-pages-for-web-developers)
 if they opt in themselves. This extension opts in for them and adds a small
@@ -12,7 +13,10 @@ are contributed by pull request, so if a site you use is missing or looks off,
 
 ## Install
 
-The extension isn't in the Chrome Web Store yet. To install it:
+**It comes preinstalled** with the Chromium Frosted Glass package (from
+157.0.8095.0-3), and updates with it. You only need to turn sites on.
+
+To install it yourself, for example in another build:
 
 1. Download `frosted-glass-sites-<version>.zip` from the newest
    [extension release](https://github.com/bennidhamma/chromium-frosted-glass-cosmic/releases?q=extension)
@@ -20,6 +24,9 @@ The extension isn't in the Chrome Web Store yet. To install it:
    `extension` folder.
 2. Open `chrome://extensions` and turn on *Developer mode*.
 3. Click *Load unpacked* and pick the unpacked folder.
+
+A copy loaded unpacked has the same ID as the preinstalled one, and takes its
+place while it's loaded, which is handy for working on site styles.
 
 ## Use
 
@@ -30,10 +37,8 @@ opaque again at once, and lose the rest of the style when reloaded.
 
 | Site | Status |
 |---|---|
-| GitHub | Checked signed out on repositories, code, issues, pull requests and gists, light and dark |
-| Google Search | Experimental: home page checked in the light theme, results pages not yet |
-| Claude | Experimental: not yet checked on a live page |
-| Gmail | Experimental: only the page background so far |
+| Claude | Checked on new and existing chats, light theme |
+| Gmail | Checked on the inbox and a message, default light theme |
 
 *Experimental* sites haven't been checked on the live site yet, so they may
 need fixing. The popup marks them.
@@ -97,26 +102,34 @@ themes if it has both.
 
 ### Writing a site style
 
-- **Keep some of the site's color behind text.** Fully clear backgrounds are
-  unreadable on busy wallpapers. Mix the site's colors with transparency using
-  the shares in `frost/base.css`: `--frost-alpha-page` for the page background,
-  `--frost-alpha-surface` for panels on top of it.
+- **Frost the window, not the work.** Lay the site out like a COSMIC window:
+  the page background, headers and margins turn to frosted glass, and the
+  areas people read and work in (the main pane, sidebar lists, the list of
+  mail or results) stay opaque, as cards with rounded corners and an 8px gap
+  around them. Text that sits directly on the glass should be short: titles,
+  tabs, navigation.
+- **Keep some of the site's color in the glass.** Fully clear backgrounds are
+  unreadable on busy wallpapers. Mix the site's page color with transparency
+  using `--frost-alpha-page` from `frost/base.css`.
 - **Prefer the site's theme variables to its class names.** Variables cover
-  every theme and survive redesigns better. When a site defines its colors on
-  `<html>`, copy them there and redefine them below it, as
-  [`sites/github.css`](sites/github.css) does:
+  every theme and survive redesigns better. To turn a container into a card,
+  give it the site's own background variable, as
+  [`sites/claude.css`](sites/claude.css) does:
 
   ```css
-  html {
-    --frost-example-bg: var(--example-bg);
-  }
   body {
-    --example-bg: color-mix(in srgb, var(--frost-example-bg) calc(var(--frost-alpha-page) * 100%), transparent) !important;
+    background-color: color-mix(in srgb, var(--example-bg) calc(var(--frost-alpha-page) * 100%), transparent) !important;
+  }
+  .example-content {
+    background-color: var(--example-bg) !important;
+    border-radius: 12px;
+    margin: 0 8px 8px !important;
   }
   ```
 
   For sites with generated class names, look for hooks that mean something,
-  like `[role="contentinfo"]`.
+  like `[role="contentinfo"]`, or derive colors from the text color, as
+  [`sites/gmail.css`](sites/gmail.css) does.
 - **Leave anything that floats over content opaque:** menus, dialogs, tooltips,
   sticky headers. On a see-through page, the content under them would show
   through, and `backdrop-filter` can't hide it: the blurred copy is drawn on top

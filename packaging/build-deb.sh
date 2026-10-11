@@ -7,7 +7,9 @@
 # it), with depot_tools on PATH. See README.md for how to get one. Needs
 # fakeroot and dpkg-dev; devscripts is optional.
 #
-# The package ends up in <chromium/src>/out/Release/dist/.
+# The package ends up in <chromium/src>/out/Release/dist/. Set EXTENSION_KEY to
+# the extension's signing key (.pem) to preinstall the Frosted Glass Sites
+# extension.
 set -euo pipefail
 
 here="$(cd "$(dirname "$0")/.." && pwd)"
@@ -44,15 +46,10 @@ cp "$here/packaging/args.gn" "$out/args.gn"
 gn gen "$out"
 autoninja -C "$out" chrome/installer/linux:stable_deb
 
-# Unofficial builds produce an uncompressed package (~450 MB). Recompress it
-# with xz, and give the package root the usual 755 permissions.
-mkdir -p "$out/dist"
+# Recompress the package and, given EXTENSION_KEY (the extension's signing
+# key), preinstall the Frosted Glass Sites extension.
 for deb in "$out"/chromium-frosted-glass-stable_*.deb; do
-  rm -rf "$tools/tree"
-  fakeroot sh -c "dpkg-deb -R '$deb' '$tools/tree' &&
-    chmod 755 '$tools/tree' &&
-    dpkg-deb -Zxz -b '$tools/tree' '$out/dist/$(basename "$deb")'"
+  "$here/packaging/finish-deb.sh" "$deb" "$out/dist" "${EXTENSION_KEY:-}"
 done
-rm -rf "$tools/tree"
 
 ls -l "$out"/dist/*.deb

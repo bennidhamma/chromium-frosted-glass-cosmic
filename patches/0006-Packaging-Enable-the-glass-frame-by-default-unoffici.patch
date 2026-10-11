@@ -1,4 +1,4 @@
-From f0707200ae760423c58f5740996c5111f1aafc1c Mon Sep 17 00:00:00 2001
+From 5c91e0ea29a7f1da2f12732da697454b23fb7851 Mon Sep 17 00:00:00 2001
 From: Ben Joldersma <bennidhamma@gmail.com>
 Date: Sat, 10 Oct 2026 16:25:47 -0700
 Subject: [PATCH 6/6] [Packaging] Enable the glass frame by default; unofficial
@@ -41,7 +41,7 @@ index 2a75b4c07d..72e8696506 100644
  
    deb_target_name = "${target_name}_deb"
 diff --git a/chrome/installer/linux/common/chromium-browser.info b/chrome/installer/linux/common/chromium-browser.info
-index 395c019f7d..50ad1ba8ea 100644
+index 395c019f7d..304a18a7d1 100644
 --- a/chrome/installer/linux/common/chromium-browser.info
 +++ b/chrome/installer/linux/common/chromium-browser.info
 @@ -6,37 +6,40 @@
@@ -52,7 +52,7 @@ index 395c019f7d..50ad1ba8ea 100644
 +PACKAGE="chromium-frosted-glass"
 +# Package revision for the Chromium version. Bump it when the patches change
 +# without a Chromium update, so that apt sees a new version.
-+PACKAGE_RELEASE=2
++PACKAGE_RELEASE=3
  
  # Filename of the main executable (for generating launcher scripts, etc.)
  PROGNAME=chrome

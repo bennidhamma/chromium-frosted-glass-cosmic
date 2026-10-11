@@ -1,4 +1,4 @@
-From 17961d545fda10b47bf3ed19632c6221095a2ae1 Mon Sep 17 00:00:00 2001
+From 6a28002ae7ffbeb1ba607bac239e0f1e3b2ba325 Mon Sep 17 00:00:00 2001
 From: Ben Joldersma <bennidhamma@gmail.com>
 Date: Sun, 11 Oct 2026 02:27:04 -0700
 Subject: [PATCH 5/6] [COSMIC] Follow COSMIC's glass opacity setting
@@ -29,7 +29,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  create mode 100644 chrome/browser/ui/views/frame/cosmic_glass_settings_linux.h
 
 diff --git a/chrome/browser/ui/views/frame/BUILD.gn b/chrome/browser/ui/views/frame/BUILD.gn
-index 5ef409d4dd..c7ab48f35b 100644
+index ade758c152..97a33a3f40 100644
 --- a/chrome/browser/ui/views/frame/BUILD.gn
 +++ b/chrome/browser/ui/views/frame/BUILD.gn
 @@ -643,6 +643,10 @@ source_set("glass_frame_service") {

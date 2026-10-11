@@ -4,7 +4,8 @@
 // and the theme color comes from the first <meta name="theme-color"> in the
 // document. Most sites declare their own, so this keeps a transparent one at
 // the start of <head>, ahead of theirs, also when the site rewrites its head
-// (GitHub does on every navigation).
+// (GitHub does on every navigation) or updates the first theme color tag,
+// which is this one (Claude does).
 //
 // This is the only script the extension runs in pages. Site styles are CSS.
 (() => {
@@ -21,7 +22,8 @@
   meta.dataset.frostedGlass = '';
   const tags = 'meta[data-frosted-glass]';
 
-  // Gives up if the page keeps removing the tag, rather than fight it.
+  // Gives up if the page keeps removing or changing the tag, rather than
+  // fight it.
   const maxMovesPerSecond = 20;
   let moves = 0;
   let movesSince = 0;
@@ -38,6 +40,7 @@
         // Sites can replace <head>, or remove the tag from it.
         observer.observe(document.documentElement, { childList: true });
         observer.observe(head, { childList: true });
+        observer.observe(meta, { attributes: true });
       } else {
         // At document_start, not even <html> may be there yet.
         observer.observe(document, { childList: true, subtree: true });
@@ -52,7 +55,10 @@
         tag.remove();
       }
     }
-    if (head.querySelector('meta[name="theme-color" i]') === meta) {
+    const changed = meta.name !== 'theme-color' ||
+        meta.content !== 'transparent' || meta.hasAttribute('media');
+    const first = head.querySelector('meta[name="theme-color" i]') === meta;
+    if (!changed && first) {
       return;
     }
     const now = performance.now();
@@ -64,7 +70,14 @@
       off();
       return;
     }
-    head.prepend(meta);
+    if (changed) {
+      meta.name = 'theme-color';
+      meta.content = 'transparent';
+      meta.removeAttribute('media');
+    }
+    if (!first) {
+      head.prepend(meta);
+    }
   }
 
   function on() {
