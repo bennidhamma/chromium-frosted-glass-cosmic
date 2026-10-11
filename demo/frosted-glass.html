@@ -126,6 +126,24 @@
   }
   .mini strong { display: block; font-size: 22px; margin-top: 4px; }
 
+  /* Desktop mode: the page itself is transparent, so in a browser that shows
+     the desktop through see-through pages (Chromium Frosted Glass with
+     GlassFrameTransparentWebContents), the cards float on the frosted desktop. */
+  html.desktop, html.desktop body { background: transparent; }
+  html.desktop .backdrop { display: none; }
+
+  .mode {
+    position: fixed;
+    top: 16px;
+    right: 16px;
+    z-index: 1;
+    padding: 8px 14px;
+    border-radius: 999px;
+    color: var(--ink);
+    font: 600 13px/1 system-ui, sans-serif;
+    cursor: pointer;
+  }
+
   @media (max-width: 600px) {
     label { grid-template-columns: 70px 1fr 48px; }
     .mini { display: none; }
@@ -142,11 +160,17 @@
     <div class="word">frosted</div>
   </div>
 
+  <button class="mode glass" id="mode" type="button">Desktop mode</button>
+
   <main>
     <section class="panel glass" id="panel">
       <h1>Frosted glass</h1>
       <p>Drag the cards around. Everything behind them is blurred live with
-        <code>backdrop-filter: blur()</code>, which works in Chrome today.</p>
+        <code>backdrop-filter: blur()</code>, which works in Chrome today.
+        In <em>desktop mode</em> the page is transparent and declares
+        <code>&lt;meta name="theme-color" content="transparent"&gt;</code>: in
+        Chromium Frosted Glass, the cards then float on your frosted
+        desktop.</p>
       <div class="controls">
         <label>Blur <input id="blur" type="range" min="0" max="60" value="24"><output id="blur-out">24px</output></label>
         <label>Tint <input id="tint" type="range" min="0" max="80" value="18"><output id="tint-out">0.18</output></label>
@@ -164,6 +188,26 @@
   </main>
 
 <script>
+  // ?desktop starts in desktop mode; the button toggles it.
+  const html = document.documentElement;
+  const modeButton = document.getElementById('mode');
+  // In desktop mode, ask Chromium Frosted Glass to make this page see-through.
+  const themeColor = document.createElement('meta');
+  themeColor.name = 'theme-color';
+  themeColor.content = 'transparent';
+  const setDesktop = on => {
+    html.classList.toggle('desktop', on);
+    if (on) {
+      document.head.append(themeColor);
+    } else {
+      themeColor.remove();
+    }
+    modeButton.textContent = on ? 'Page backdrop' : 'Desktop mode';
+  };
+  setDesktop(new URLSearchParams(location.search).has('desktop'));
+  modeButton.addEventListener('click', () =>
+      setDesktop(!html.classList.contains('desktop')));
+
   const root = document.documentElement.style;
   const bind = (id, prop, fmt) => {
     const input = document.getElementById(id);

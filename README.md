@@ -19,19 +19,15 @@ that implement the protocol should work too.
 - **Frosted menus.** The app menu, context menus and bookmark menus blur what is
   behind them.
 - **See-through `chrome://` pages.** Settings, history, downloads, extensions and
-  the new tab page show the frosted desktop behind semi-opaque cards. Regular
-  websites stay opaque.
-- Glass follows Chrome's [Glass Frame][glass-frame] design: it is shown on the most
-  recently active window, and turned off in fullscreen, with battery saver, or with
-  an extension theme. It can be turned off in *Settings → Appearance → Tab
-  styling*.
+  the new tab page show the frosted desktop behind semi-opaque cards.
+- **Frosted web pages, opt-in.** A web page can ask to be see-through too; see
+  [Frosted pages](#frosted-pages-for-web-developers). All other sites stay opaque.
+- Every window is frosted. Glass builds on Chrome's [Glass Frame][glass-frame]
+  and, like it, turns off in fullscreen, with battery saver, or with an extension
+  theme. It can be turned off in *Settings → Appearance → Tab styling*.
 - On compositors without blur support (or on X11), it looks like regular Chromium.
 
 ## Install (Ubuntu 24.04 / Pop!_OS 24.04, amd64)
-
-> **Status:** the first package is still being built. Until the
-> [`apt` release][apt-release] exists, `apt update` reports that the repository
-> has no Release file.
 
 ```bash
 sudo curl -fsSLo /usr/share/keyrings/chromium-frosted-glass-cosmic.asc \
@@ -39,7 +35,7 @@ sudo curl -fsSLo /usr/share/keyrings/chromium-frosted-glass-cosmic.asc \
 echo "deb [signed-by=/usr/share/keyrings/chromium-frosted-glass-cosmic.asc] https://github.com/bennidhamma/chromium-frosted-glass-cosmic/releases/download/apt ./" \
   | sudo tee /etc/apt/sources.list.d/chromium-frosted-glass-cosmic.list
 sudo apt update
-sudo apt install chromium-frosted-glass
+sudo apt install chromium-frosted-glass-stable
 ```
 
 It installs to `/opt/chromium-frosted-glass` and shows up as **Chromium Frosted
@@ -47,13 +43,19 @@ Glass**. Run it from the terminal with `chromium-frosted-glass-stable`.
 
 The packages live as assets on the [`apt` release][apt-release]; there is no
 server. The repository signing key's fingerprint is
-`AC34 3387 E3A4 9BFD C8D5  B431 3A84 2D10 64D9 9A73`.
+`AC34 3387 E3A4 9BFD C8D5  B431 3A84 2D10 64D9 9A73`. You can also download the
+`.deb` from there and install it with `sudo apt install ./chromium-frosted-glass-stable_*.deb`.
+
+Unlike Google's packages, this one doesn't add an apt source, signing key or cron
+job to your system: the key and source list above are the only setup. To uninstall:
+`sudo apt remove chromium-frosted-glass-stable`, then delete the `.list` and `.asc`
+files.
 
 Things to know:
 
-- **Updates are manual.** This is a personal build. Security fixes arrive when the
-  patches are rebased onto a newer Chromium and a new package is published, not on
-  Chromium's schedule.
+- **Updates lag behind Chromium.** This is a personal build. `apt upgrade` picks up
+  a new version when the patches are rebased onto a newer Chromium and a package is
+  published, not on Chromium's schedule, so security fixes arrive late.
 - **No proprietary codecs.** Like most redistributed Chromium builds, it can't
   play H.264/AAC media.
 - **Profile.** It uses the regular Chromium profile directory (`~/.config/chromium`).
@@ -72,12 +74,44 @@ chromium-frosted-glass-stable --enable-features='GlassFrame:GlassFrameToolbarOpa
 | Parameter | Default (Linux) | Meaning |
 |---|---|---|
 | `GlassFrameLinuxTintOpacityLight` / `…Dark` | 0.35 / 0.45 | Tint of the frame over the blurred desktop |
+| `GlassFrameMaxWindows` | 0 (no limit) | Only frost the N most recently active windows (Chrome on macOS uses 1) |
 | `GlassFrameToolbarOpacity` | 0.2 | Toolbar, bookmarks bar and active tab. `1` keeps them opaque (macOS-style) |
 | `GlassFrameMenuOpacity` | 0.7 | Menu background. `1` turns frosted menus off |
 | `GlassFrameTransparentWebUI` | true | See-through `chrome://` pages |
+| `GlassFrameTransparentWebContentsOptIn` | true | Let pages opt into being see-through (see below) |
 | `GlassFrameTransparentWebContents` | false | Make *every* page see-through where it doesn't paint its own background. Fun for demos, bad for reading most sites |
 
 To turn glass off entirely: `--disable-features=GlassFrame`.
+
+## Frosted pages (for web developers)
+
+A page can show the user's frosted desktop behind it. Declare a transparent theme
+color, and don't paint a background on the root:
+
+```html
+<meta name="theme-color" content="transparent">
+<style>
+  html, body { background: transparent; }
+  .card {
+    background: rgb(255 255 255 / 0.12);
+    border: 1px solid rgb(255 255 255 / 0.2);
+    border-radius: 16px;
+  }
+</style>
+```
+
+- The desktop behind the window is blurred by the compositor and tinted with the
+  frame color, so text needs the same care as on any frosted surface. Put content on
+  translucent cards rather than directly on the backdrop.
+- CSS `backdrop-filter` can't see the desktop: the page itself is transparent, and
+  the blur happens outside the browser. Use plain translucent colors on top.
+- Only the top-level page's theme color counts. Adding or removing the `<meta>` tag
+  at runtime switches the effect on and off.
+- It applies while the window shows glass: not in fullscreen or with battery saver.
+  In those cases, and in every other browser, the page is shown on the browser's
+  normal background. Add
+  `color-scheme: dark` (or light) so that fallback matches your design.
+- Users can turn the opt-in off with `GlassFrameTransparentWebContentsOptIn/false`.
 
 ## COSMIC's blur offset
 
@@ -115,23 +149,24 @@ not each build-tested.
 ## Building from source
 
 You need a Linux machine with ~150 GB free disk and a few hours. Follow
-[Chromium's checkout instructions][checkout], check out the base revision, then:
+[Chromium's checkout instructions][checkout], check out the base revision, install
+`fakeroot` and `dpkg-dev`, then:
 
 ```bash
 packaging/build-deb.sh ~/chromium/src
 ```
 
 That applies the patches, builds with [`packaging/args.gn`](packaging/args.gn) and
-produces `out/Release/chromium-frosted-glass_<version>-1_amd64.deb`.
+produces `out/Release/dist/chromium-frosted-glass-stable_<version>-1_amd64.deb`.
 [`packaging/publish-apt.sh`](packaging/publish-apt.sh) signs and publishes packages
 to the `apt` release.
 
 ## Demo
 
 [`demo/frosted-glass.html`](demo/frosted-glass.html) shows frosted glass *inside* a
-page with CSS `backdrop-filter`, which works in any current browser. To have a page
-frost the desktop itself, run this build with `GlassFrameTransparentWebContents/true`
-and give the page a transparent background.
+page with CSS `backdrop-filter`, which works in any current browser. Its *Desktop
+mode* button (or `?desktop` in the URL) uses the opt-in above, so in this build the
+cards float on your frosted desktop.
 
 ## License
 

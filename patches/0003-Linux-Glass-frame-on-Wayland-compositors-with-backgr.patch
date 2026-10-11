@@ -1,4 +1,4 @@
-From 6c23d0db78aa1f3a5d1deda20b6635ba03fe60af Mon Sep 17 00:00:00 2001
+From 0b89be3fe40a85742d9042cc6e0c429af167635c Mon Sep 17 00:00:00 2001
 From: Ben Joldersma <bennidhamma@gmail.com>
 Date: Sat, 10 Oct 2026 16:25:43 -0700
 Subject: [PATCH 3/5] [Linux] Glass frame on Wayland compositors with
@@ -23,8 +23,14 @@ through ext-background-effect-v1 instead of NSGlassEffectView:
   active tab and tab strip buttons become translucent
   (GlassFrameToolbarOpacity), menus of glass windows are translucent
   (GlassFrameMenuOpacity), and chrome:// pages are see-through with
-  semi-opaque cards (GlassFrameTransparentWebUI). An opt-in param makes
-  all pages see-through (GlassFrameTransparentWebContents).
+  semi-opaque cards (GlassFrameTransparentWebUI). Web pages can opt in
+  with <meta name="theme-color" content="transparent">
+  (GlassFrameTransparentWebContentsOptIn), and a param makes all pages
+  see-through (GlassFrameTransparentWebContents). The new tab page picks
+  up color changes of its window, so it turns see-through when the
+  window becomes glass after the page loaded.
+- On Linux every window shows glass, as on desktops like COSMIC that
+  frost all windows (GlassFrameMaxWindows limits it); macOS keeps one.
 - GlassFrameService::GetTintOpacity() is shared with macOS.
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
@@ -50,20 +56,22 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  .../frame/browser_native_widget_aura_linux.cc |   6 +
  .../frame/browser_native_widget_aura_linux.h  |   4 +
  .../views/frame/browser_native_widget_mac.mm  |  26 +-
- .../ui/views/frame/contents_web_view.cc       |  52 +++-
- .../ui/views/frame/contents_web_view.h        |   7 +
- .../ui/views/frame/glass_frame_service.cc     |  88 ++++++-
- .../ui/views/frame/glass_frame_service.h      |  20 ++
- .../glass_frame_service_interactive_uitest.cc |   8 +-
+ .../ui/views/frame/contents_web_view.cc       |  77 +++++-
+ .../ui/views/frame/contents_web_view.h        |   9 +
+ .../ui/views/frame/glass_frame_service.cc     | 110 +++++++-
+ .../ui/views/frame/glass_frame_service.h      |  25 +-
+ .../glass_frame_service_interactive_uitest.cc |  13 +-
  .../layout/browser_view_tabbed_layout_impl.cc |  29 +++
  .../layout/browser_view_tabbed_layout_impl.h  |   4 +
  .../views/frame/opaque_browser_frame_view.h   |   2 +-
  .../ui/views/frame/themed_background.cc       |  10 +
  .../ui/views/frame/themed_background.h        |   8 +
  .../tabs/common/horizontal_tab_style_views.cc |  17 +-
- ui/base/ui_base_features.cc                   |  34 +++
- ui/base/ui_base_features.h                    |  15 ++
- 34 files changed, 737 insertions(+), 46 deletions(-)
+ .../new_tab_page/new_tab_page_handler.cc      |   5 +
+ .../webui/new_tab_page/new_tab_page_handler.h |   8 +-
+ ui/base/ui_base_features.cc                   |  38 +++
+ ui/base/ui_base_features.h                    |  19 ++
+ 36 files changed, 811 insertions(+), 52 deletions(-)
 
 diff --git a/chrome/browser/about_flags.cc b/chrome/browser/about_flags.cc
 index fbf4261d9a..4a28aa1103 100644
@@ -1031,10 +1039,15 @@ index 73a8db26c2..4419de3439 100644
    const CGFloat r = SkColorGetR(theme_color) / 255.0;
    const CGFloat g = SkColorGetG(theme_color) / 255.0;
 diff --git a/chrome/browser/ui/views/frame/contents_web_view.cc b/chrome/browser/ui/views/frame/contents_web_view.cc
-index 1d0ea60d8f..564e54334b 100644
+index 1d0ea60d8f..2d96b212d3 100644
 --- a/chrome/browser/ui/views/frame/contents_web_view.cc
 +++ b/chrome/browser/ui/views/frame/contents_web_view.cc
-@@ -7,6 +7,7 @@
+@@ -4,9 +4,12 @@
+ 
+ #include "chrome/browser/ui/views/frame/contents_web_view.h"
+ 
++#include <optional>
++
  #include "base/debug/dump_without_crashing.h"
  #include "build/build_config.h"
  #include "chrome/browser/ui/color/chrome_color_id.h"
@@ -1042,7 +1055,7 @@ index 1d0ea60d8f..564e54334b 100644
  #include "chrome/browser/ui/views/frame/safe_invoke/safe_invoke.h"
  #include "chrome/browser/ui/views/frame/web_contents_close_handler.h"
  #include "chrome/browser/ui/views/status_bubble_views.h"
-@@ -14,14 +15,17 @@
+@@ -14,14 +17,17 @@
  #include "components/web_modal/web_contents_modal_dialog_manager.h"
  #include "content/public/browser/render_widget_host_view.h"
  #include "content/public/browser/web_contents.h"
@@ -1060,12 +1073,27 @@ index 1d0ea60d8f..564e54334b 100644
  
  #if defined(USE_AURA)
  #include "ui/aura/window.h"
-@@ -200,7 +204,49 @@ void ContentsWebView::DidGetUserInteraction(const blink::WebInputEvent& event) {
+@@ -200,7 +206,72 @@ void ContentsWebView::DidGetUserInteraction(const blink::WebInputEvent& event) {
  }
  #endif
  
 +void ContentsWebView::PrimaryPageChanged(content::Page& page) {
 +  views::WebView::PrimaryPageChanged(page);
++  if (GetWidget()) {
++    UpdateBackgroundColor();
++  }
++}
++
++void ContentsWebView::DidChangeThemeColor() {
++  if (GetWidget()) {
++    UpdateBackgroundColor();
++  }
++}
++
++void ContentsWebView::DidFirstVisuallyNonEmptyPaint() {
++  // DidChangeThemeColor() is not called when a new page has the same theme
++  // color as the previous one, e.g. after a reload, so check again once the
++  // page's theme color is known.
 +  if (GetWidget()) {
 +    UpdateBackgroundColor();
 +  }
@@ -1087,6 +1115,14 @@ index 1d0ea60d8f..564e54334b 100644
 +  }
 +  if (features::kGlassFrameTransparentWebContents.Get()) {
 +    return true;
++  }
++  // Pages can opt in with <meta name="theme-color" content="transparent">.
++  if (features::kGlassFrameTransparentWebContentsOptIn.Get()) {
++    if (const std::optional<SkColor> theme_color =
++            web_contents()->GetThemeColor();
++        theme_color && SkColorGetA(*theme_color) == SK_AlphaTRANSPARENT) {
++      return true;
++    }
 +  }
 +  return features::kGlassFrameTransparentWebUI.Get() &&
 +         web_contents()->GetLastCommittedURL().SchemeIs(
@@ -1110,7 +1146,7 @@ index 1d0ea60d8f..564e54334b 100644
    const SkColor color = GetColorProvider()->GetColor(
        is_letterboxing() ? kColorWebContentsBackgroundLetterboxing
                          : kColorWebContentsBackground);
-@@ -209,19 +255,19 @@ void ContentsWebView::UpdateBackgroundColor() {
+@@ -209,19 +280,19 @@ void ContentsWebView::UpdateBackgroundColor() {
    // TODO(crbug.com/456309057): Update this to be a CHECK.
    if (SkColorGetA(color) != SK_AlphaOPAQUE) {
      base::debug::DumpWithoutCrashing();
@@ -1134,14 +1170,16 @@ index 1d0ea60d8f..564e54334b 100644
  
  std::unique_ptr<ui::Layer> ContentsWebView::RecreateLayer() {
 diff --git a/chrome/browser/ui/views/frame/contents_web_view.h b/chrome/browser/ui/views/frame/contents_web_view.h
-index 0dc0d4b8d3..0392607ce7 100644
+index 0dc0d4b8d3..614fac4e9a 100644
 --- a/chrome/browser/ui/views/frame/contents_web_view.h
 +++ b/chrome/browser/ui/views/frame/contents_web_view.h
-@@ -62,6 +62,11 @@ class ContentsWebView : public views::WebView,
+@@ -62,6 +62,13 @@ class ContentsWebView : public views::WebView,
    void RenderViewReady() override;
    void OnLetterboxingChanged() override;
    void SetWebContents(content::WebContents* web_contents) override;
 +  void PrimaryPageChanged(content::Page& page) override;
++  void DidChangeThemeColor() override;
++  void DidFirstVisuallyNonEmptyPaint() override;
 +
 +  // Whether the web contents are see-through, showing the glass frame behind
 +  // them, see features::kGlassFrameTransparentWebUI.
@@ -1149,7 +1187,7 @@ index 0dc0d4b8d3..0392607ce7 100644
  
    // content::WebContentsObserver overrides:
    // Overridden to track physical interactions (mouse/touch) on the WebContents.
-@@ -81,10 +86,12 @@ class ContentsWebView : public views::WebView,
+@@ -81,10 +88,12 @@ class ContentsWebView : public views::WebView,
  
   private:
    void UpdateBackgroundColor();
@@ -1163,19 +1201,20 @@ index 0dc0d4b8d3..0392607ce7 100644
    bool use_default_deadline_when_animating_ = false;
  
 diff --git a/chrome/browser/ui/views/frame/glass_frame_service.cc b/chrome/browser/ui/views/frame/glass_frame_service.cc
-index a674a3969b..a1f1581d25 100644
+index a674a3969b..d09c64a562 100644
 --- a/chrome/browser/ui/views/frame/glass_frame_service.cc
 +++ b/chrome/browser/ui/views/frame/glass_frame_service.cc
-@@ -4,6 +4,8 @@
+@@ -4,6 +4,9 @@
  
  #include "chrome/browser/ui/views/frame/glass_frame_service.h"
  
 +#include <algorithm>
 +#include <array>
++#include <limits>
  #include <memory>
  #include <string>
  #include <utility>
-@@ -13,6 +15,7 @@
+@@ -13,6 +16,7 @@
  #include "base/functional/bind.h"
  #include "base/location.h"
  #include "base/memory/raw_ptr.h"
@@ -1183,7 +1222,7 @@ index a674a3969b..a1f1581d25 100644
  #include "base/metrics/histogram_functions.h"
  #include "base/time/time.h"
  #include "base/timer/timer.h"
-@@ -43,12 +46,32 @@
+@@ -43,12 +47,34 @@
  #include "base/mac/mac_util.h"
  #endif
  
@@ -1211,12 +1250,14 @@ index a674a3969b..a1f1581d25 100644
 +                   kGlassFrameLinuxTintOpacityDark,
 +                   &features::kGlassFrame,
 +                   0.45);
++// Maximum number of glass windows; 0 means no limit.
++BASE_FEATURE_PARAM(int, kGlassFrameMaxWindows, &features::kGlassFrame, 0);
 +#endif  // BUILDFLAG(IS_LINUX)
 +
  }  // namespace
  
  class GlassFrameMetricsReporter {
-@@ -99,9 +122,9 @@ GlassFrameService* GlassFrameService::GetInstance() {
+@@ -99,9 +125,9 @@ GlassFrameService* GlassFrameService::GetInstance() {
  // static
  void GlassFrameService::RegisterLocalStatePrefs(PrefRegistrySimple* registry) {
    bool default_enabled = true;
@@ -1228,7 +1269,7 @@ index a674a3969b..a1f1581d25 100644
    registry->RegisterBooleanPref(prefs::kGlassFrameEnabled, default_enabled);
    metrics::DailyEvent::RegisterPref(registry, prefs::kGlassFrameDailySample);
  }
-@@ -116,11 +139,11 @@ GlassFrameService::GlassFrameService(BrowserProcess& process)
+@@ -116,11 +142,11 @@ GlassFrameService::GlassFrameService(BrowserProcess& process)
    CHECK(g_browser_process);
    PrefService* const pref_service = g_browser_process->local_state();
    CHECK(pref_service);
@@ -1242,7 +1283,16 @@ index a674a3969b..a1f1581d25 100644
    is_glass_frame_enabled_ = pref_service->GetBoolean(prefs::kGlassFrameEnabled);
    pref_change_registrar_.Init(pref_service);
    pref_change_registrar_.Add(
-@@ -178,8 +201,63 @@ bool GlassFrameService::HasMultipleOpenProfiles() const {
+@@ -139,7 +165,7 @@ GlassFrameService::GlassFrameService(BrowserProcess& process)
+       [this](BrowserWindowInterface* browser) {
+         MaybeTrackBrowser(browser);
+         if (IsGlassFrameAllowed() &&
+-            eligible_browsers_.size() < kMaxGlassWindows &&
++            eligible_browsers_.size() < GetMaxGlassWindows() &&
+             IsBrowserEligibleForGlass(browser)) {
+           eligible_browsers_.insert(browser);
+         }
+@@ -178,8 +204,74 @@ bool GlassFrameService::HasMultipleOpenProfiles() const {
    return has_multiple_open_profiles_;
  }
  
@@ -1272,6 +1322,17 @@ index a674a3969b..a1f1581d25 100644
 +    opacity += multiple_open_profiles_opacity_increase;
 +  }
 +  return std::clamp(opacity, 0.0, 1.0);
++}
++
++// static
++size_t GlassFrameService::GetMaxGlassWindows() {
++#if BUILDFLAG(IS_LINUX)
++  const int max_windows = kGlassFrameMaxWindows.Get();
++  return max_windows > 0 ? static_cast<size_t>(max_windows)
++                         : std::numeric_limits<size_t>::max();
++#else
++  return kMaxGlassWindows;
++#endif
 +}
 +
 +void GlassFrameService::OnPlatformBlurSupportChanged() {
@@ -1307,8 +1368,26 @@ index a674a3969b..a1f1581d25 100644
  }
  
  void GlassFrameService::OnBrowserCreated(BrowserWindowInterface* browser) {
+@@ -272,13 +364,15 @@ GlassFrameService::GetEligibleBrowserWindowInterfaces() {
+       [&activation_ordered_eligible_browsers,
+        this](BrowserWindowInterface* browser) {
+         // Stop iterating once the maximum number of glass windows is reached.
+-        if (activation_ordered_eligible_browsers.size() >= kMaxGlassWindows) {
++        if (activation_ordered_eligible_browsers.size() >=
++            GetMaxGlassWindows()) {
+           return false;
+         }
+         if (IsBrowserEligibleForGlass(browser)) {
+           activation_ordered_eligible_browsers.insert(browser);
+         }
+-        return activation_ordered_eligible_browsers.size() < kMaxGlassWindows;
++        return activation_ordered_eligible_browsers.size() <
++               GetMaxGlassWindows();
+       },
+       BrowserCollection::Order::kActivation);
+   return activation_ordered_eligible_browsers;
 diff --git a/chrome/browser/ui/views/frame/glass_frame_service.h b/chrome/browser/ui/views/frame/glass_frame_service.h
-index 9ece88b87f..90793f5cfa 100644
+index 9ece88b87f..85b943b05e 100644
 --- a/chrome/browser/ui/views/frame/glass_frame_service.h
 +++ b/chrome/browser/ui/views/frame/glass_frame_service.h
 @@ -8,6 +8,7 @@
@@ -1319,7 +1398,20 @@ index 9ece88b87f..90793f5cfa 100644
  #include "base/callback_list.h"
  #include "base/containers/flat_set.h"
  #include "base/functional/callback.h"
-@@ -65,6 +66,21 @@ class GlassFrameService : public BrowserCollectionObserver,
+@@ -45,8 +46,11 @@ class GlassFrameService : public BrowserCollectionObserver,
+   static void RegisterLocalStatePrefs(PrefRegistrySimple* registry);
+ 
+   // Maximum number of windows that will display the glass frame at any given
+-  // time.
++  // time, by default. On Linux, where the compositor blurs behind windows and
++  // desktops like COSMIC frost all their windows, there is no limit unless
++  // set with the GlassFrameMaxWindows param.
+   static constexpr size_t kMaxGlassWindows = 1;
++  static size_t GetMaxGlassWindows();
+ 
+   GlassFrameService(const GlassFrameService&) = delete;
+   GlassFrameService& operator=(const GlassFrameService&) = delete;
+@@ -65,6 +69,21 @@ class GlassFrameService : public BrowserCollectionObserver,
    // Returns true if more than one profile is currently loaded.
    bool HasMultipleOpenProfiles() const;
  
@@ -1341,7 +1433,7 @@ index 9ece88b87f..90793f5cfa 100644
    explicit GlassFrameService(BrowserProcess& process);
    ~GlassFrameService() override;
  
-@@ -94,6 +110,10 @@ class GlassFrameService : public BrowserCollectionObserver,
+@@ -94,6 +113,10 @@ class GlassFrameService : public BrowserCollectionObserver,
    // frame. Returns false otherwise.
    bool IsGlassFrameAllowed();
  
@@ -1353,7 +1445,7 @@ index 9ece88b87f..90793f5cfa 100644
    // the glass frame. The returned set has at most `kMaxGlassWindows` elements.
    base::flat_set<raw_ptr<BrowserWindowInterface>>
 diff --git a/chrome/browser/ui/views/frame/glass_frame_service_interactive_uitest.cc b/chrome/browser/ui/views/frame/glass_frame_service_interactive_uitest.cc
-index ae5c1963e6..358f7301e4 100644
+index ae5c1963e6..bff19c1274 100644
 --- a/chrome/browser/ui/views/frame/glass_frame_service_interactive_uitest.cc
 +++ b/chrome/browser/ui/views/frame/glass_frame_service_interactive_uitest.cc
 @@ -4,6 +4,7 @@
@@ -1364,7 +1456,19 @@ index ae5c1963e6..358f7301e4 100644
  #include "base/callback_list.h"
  #include "base/functional/bind.h"
  #include "base/memory/raw_ptr.h"
-@@ -120,6 +121,9 @@ class GlassFrameServiceInteractiveTest : public InProcessBrowserTest {
+@@ -75,7 +76,10 @@ class FakeThemeService : public ThemeService {
+ class GlassFrameServiceInteractiveTest : public InProcessBrowserTest {
+  public:
+   GlassFrameServiceInteractiveTest() {
+-    scoped_feature_list_.InitAndEnableFeature(features::kGlassFrame);
++    // These tests cover the single glass window behavior; Linux has no limit
++    // by default.
++    scoped_feature_list_.InitAndEnableFeatureWithParameters(
++        features::kGlassFrame, {{"GlassFrameMaxWindows", "1"}});
+   }
+ 
+   void SetUpInProcessBrowserTestFixture() override {
+@@ -120,6 +124,9 @@ class GlassFrameServiceInteractiveTest : public InProcessBrowserTest {
  
   private:
    base::test::ScopedFeatureList scoped_feature_list_;
@@ -1374,7 +1478,7 @@ index ae5c1963e6..358f7301e4 100644
    ui::UserDataFactory::ScopedOverride glass_frame_service_override_;
    base::CallbackListSubscription create_services_subscription_;
  };
-@@ -415,12 +419,12 @@ IN_PROC_BROWSER_TEST_F(GlassFrameServiceInteractiveTest,
+@@ -415,12 +422,12 @@ IN_PROC_BROWSER_TEST_F(GlassFrameServiceInteractiveTest,
    EXPECT_TRUE(GlassFrameEligibilityMatchesTabStrip(browser_window));
  }
  
@@ -1568,11 +1672,60 @@ index 5e8bf7705c..6dbfa3fe40 100644
      canvas->DrawRect(gfx::ScaleToEnclosingRect(
                           delegate_->GetView()->GetLocalBounds(), scale),
                       flags);
+diff --git a/chrome/browser/ui/webui/new_tab_page/new_tab_page_handler.cc b/chrome/browser/ui/webui/new_tab_page/new_tab_page_handler.cc
+index da34724562..1e8dd7b77c 100644
+--- a/chrome/browser/ui/webui/new_tab_page/new_tab_page_handler.cc
++++ b/chrome/browser/ui/webui/new_tab_page/new_tab_page_handler.cc
+@@ -438,6 +438,7 @@ NewTabPageHandler::NewTabPageHandler(
+     const std::vector<ntp::ModuleIdDetail>* module_id_details)
+     : SettingsEnabledObserver(
+           optimization_guide::UserVisibleFeatureKey::kWallpaperSearch),
++      content::WebContentsObserver(web_contents),
+       logger_(profile,
+               chrome::ChromeUINewTabPageURLAsGURL(),
+               ntp_navigation_start_time_ticks),
+@@ -1129,6 +1130,10 @@ void NewTabPageHandler::OnThemeChanged() {
+                             web_contents_));
+ }
+ 
++void NewTabPageHandler::OnColorProviderChanged() {
++  OnThemeChanged();
++}
++
+ void NewTabPageHandler::OnCustomBackgroundImageUpdated() {
+   OnThemeChanged();
+ }
+diff --git a/chrome/browser/ui/webui/new_tab_page/new_tab_page_handler.h b/chrome/browser/ui/webui/new_tab_page/new_tab_page_handler.h
+index 07503b9f26..b987ef8e9e 100644
+--- a/chrome/browser/ui/webui/new_tab_page/new_tab_page_handler.h
++++ b/chrome/browser/ui/webui/new_tab_page/new_tab_page_handler.h
+@@ -81,7 +81,8 @@ class NewTabPageHandler
+       public NtpCustomBackgroundServiceObserver,
+       public optimization_guide::SettingsEnabledObserver,
+       public MicrosoftAuthServiceObserver,
+-      public new_tab_footer::NewTabFooterControllerObserver {
++      public new_tab_footer::NewTabFooterControllerObserver,
++      public content::WebContentsObserver {
+  public:
+   NewTabPageHandler(mojo::PendingReceiver<new_tab_page::mojom::PageHandler>
+                         pending_page_handler,
+@@ -171,6 +172,11 @@ class NewTabPageHandler
+   // ThemeServiceObserver:
+   void OnThemeChanged() override;
+ 
++  // content::WebContentsObserver:
++  // Colors can change with the hosting window, e.g. when it starts showing a
++  // glass frame, without a theme change.
++  void OnColorProviderChanged() override;
++
+   // NtpCustomBackgroundServiceObserver:
+   void OnCustomBackgroundImageUpdated() override;
+ 
 diff --git a/ui/base/ui_base_features.cc b/ui/base/ui_base_features.cc
-index 3ee35e743d..0097e5d428 100644
+index 3ee35e743d..c2de37fd82 100644
 --- a/ui/base/ui_base_features.cc
 +++ b/ui/base/ui_base_features.cc
-@@ -521,6 +521,35 @@ BASE_FEATURE(kDesktopGlowUp, base::FEATURE_DISABLED_BY_DEFAULT);
+@@ -521,6 +521,39 @@ BASE_FEATURE(kDesktopGlowUp, base::FEATURE_DISABLED_BY_DEFAULT);
  BASE_FEATURE(kGlassFrame, base::FEATURE_DISABLED_BY_DEFAULT);
  BASE_FEATURE_PARAM(bool, kGlassExpandOnHoverEnabled, &kGlassFrame, true);
  BASE_FEATURE_PARAM(bool, kGlassFrameEnabledByDefault, &kGlassFrame, true);
@@ -1605,10 +1758,14 @@ index 3ee35e743d..0097e5d428 100644
 +                   kGlassFrameTransparentWebContents,
 +                   &kGlassFrame,
 +                   false);
++BASE_FEATURE_PARAM(bool,
++                   kGlassFrameTransparentWebContentsOptIn,
++                   &kGlassFrame,
++                   kDefaultGlassFrameTransparentWebUI);
  
  BASE_FEATURE(kRoundedIcons, base::FEATURE_DISABLED_BY_DEFAULT);
  BASE_FEATURE(kWebUIRoundedIcons, base::FEATURE_DISABLED_BY_DEFAULT);
-@@ -548,6 +577,11 @@ bool IsGlassFrameEnabled() {
+@@ -548,6 +581,11 @@ bool IsGlassFrameEnabled() {
  #if BUILDFLAG(IS_MAC)
    return base::mac::MacOSMajorVersion() >= 26 &&
           base::FeatureList::IsEnabled(kGlassFrame);
@@ -1621,10 +1778,10 @@ index 3ee35e743d..0097e5d428 100644
    return false;
  #endif
 diff --git a/ui/base/ui_base_features.h b/ui/base/ui_base_features.h
-index da93c9ce93..d8c895207c 100644
+index da93c9ce93..d45ef6e951 100644
 --- a/ui/base/ui_base_features.h
 +++ b/ui/base/ui_base_features.h
-@@ -340,6 +340,21 @@ COMPONENT_EXPORT(UI_BASE_FEATURES)
+@@ -340,6 +340,25 @@ COMPONENT_EXPORT(UI_BASE_FEATURES)
  BASE_DECLARE_FEATURE_PARAM(bool, kGlassExpandOnHoverEnabled);
  COMPONENT_EXPORT(UI_BASE_FEATURES)
  BASE_DECLARE_FEATURE_PARAM(bool, kGlassFrameEnabledByDefault);
@@ -1643,6 +1800,10 @@ index da93c9ce93..d8c895207c 100644
 +BASE_DECLARE_FEATURE_PARAM(bool, kGlassFrameTransparentWebUI);
 +COMPONENT_EXPORT(UI_BASE_FEATURES)
 +BASE_DECLARE_FEATURE_PARAM(bool, kGlassFrameTransparentWebContents);
++// With a translucent toolbar: whether pages can opt into being see-through
++// with <meta name="theme-color" content="transparent">.
++COMPONENT_EXPORT(UI_BASE_FEATURES)
++BASE_DECLARE_FEATURE_PARAM(bool, kGlassFrameTransparentWebContentsOptIn);
  COMPONENT_EXPORT(UI_BASE_FEATURES)
  BASE_DECLARE_FEATURE(kRoundedIcons);
  COMPONENT_EXPORT(UI_BASE_FEATURES)

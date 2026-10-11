@@ -1,4 +1,4 @@
-From b7c94c5360a7a9c401d0e81f6a5d58d121c7eeb3 Mon Sep 17 00:00:00 2001
+From f4acc22110f046c9d933070db39fddf20c91cb5b Mon Sep 17 00:00:00 2001
 From: Ben Joldersma <bennidhamma@gmail.com>
 Date: Sat, 10 Oct 2026 16:25:47 -0700
 Subject: [PATCH 5/5] [Packaging] Enable the glass frame by default; unofficial
@@ -10,13 +10,33 @@ Subject: [PATCH 5/5] [Packaging] Enable the glass frame by default; unofficial
   /opt/chromium-frosted-glass, with its own name, maintainer and
   description, so it neither claims to be an official Chromium build
   nor conflicts with one.
+- Don't install the cron job, apt sources or signing key that point at
+  Google's repository. Users add this build's repository themselves.
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
- .../linux/common/chromium-browser.info        | 20 +++++++++----------
- ui/base/ui_base_features.cc                   |  6 ++++++
- 2 files changed, 16 insertions(+), 10 deletions(-)
+ chrome/installer/linux/BUILD.gn               |  3 +-
+ .../linux/common/chromium-browser.info        | 20 ++++++------
+ chrome/installer/linux/debian/build.py        | 31 ++-----------------
+ chrome/installer/linux/debian/postinst        |  6 ++--
+ chrome/installer/linux/debian/postrm          |  5 ++-
+ ui/base/ui_base_features.cc                   |  6 ++++
+ 6 files changed, 24 insertions(+), 47 deletions(-)
 
+diff --git a/chrome/installer/linux/BUILD.gn b/chrome/installer/linux/BUILD.gn
+index 2a75b4c07d..72e8696506 100644
+--- a/chrome/installer/linux/BUILD.gn
++++ b/chrome/installer/linux/BUILD.gn
+@@ -565,7 +565,8 @@ template("linux_package") {
+   if (is_chrome_branded) {
+     package = "google-chrome"
+   } else {
+-    package = "chromium-browser"
++    # Must match PACKAGE in common/chromium-browser.info.
++    package = "chromium-frosted-glass"
+   }
+ 
+   deb_target_name = "${target_name}_deb"
 diff --git a/chrome/installer/linux/common/chromium-browser.info b/chrome/installer/linux/common/chromium-browser.info
 index 395c019f7d..47df1584a7 100644
 --- a/chrome/installer/linux/common/chromium-browser.info
@@ -69,8 +89,84 @@ index 395c019f7d..47df1584a7 100644
  
 -RDN="org.chromium.Chromium"
 +RDN="io.github.bennidhamma.ChromiumFrostedGlass"
+diff --git a/chrome/installer/linux/debian/build.py b/chrome/installer/linux/debian/build.py
+index e9d12851e3..cc1a371d5e 100755
+--- a/chrome/installer/linux/debian/build.py
++++ b/chrome/installer/linux/debian/build.py
+@@ -120,10 +120,6 @@ def main() -> None:
+         inst.prep_staging_common()
+         (staging_dir / "DEBIAN").mkdir(parents=True, exist_ok=True)
+         (staging_dir / "DEBIAN").chmod(installer.StandardPermissions.EXECUTABLE)
+-        (staging_dir / "etc/cron.daily").mkdir(parents=True, exist_ok=True)
+-        (staging_dir / "etc/cron.daily").chmod(
+-            installer.StandardPermissions.EXECUTABLE
+-        )
+         (staging_dir / f"usr/share/doc/{config.usr_bin_symlink_name}").mkdir(
+             parents=True, exist_ok=True
+         )
+@@ -135,31 +131,8 @@ def main() -> None:
+ 
+         logging.info(f"Staging Debian install files in '{staging_dir}'...")
+         install_dir = staging_dir / config.info_vars["INSTALLDIR"].lstrip("/")
+-        cron_dir = install_dir / "cron"
+-        cron_dir.mkdir(parents=True, exist_ok=True)
+-        cron_dir.chmod(installer.StandardPermissions.EXECUTABLE)
+-
+-        cron_file = cron_dir / config.info_vars["PACKAGE"]
+-        installer.process_template(
+-            output_dir / "installer/common/repo.cron",
+-            cron_file,
+-            config.get_template_context(),
+-        )
+-        cron_file.chmod(installer.StandardPermissions.EXECUTABLE)
+-
+-        cron_daily_link = (
+-            staging_dir / "etc/cron.daily" / config.info_vars["PACKAGE"]
+-        )
+-        if cron_daily_link.is_symlink() or cron_daily_link.exists():
+-            cron_daily_link.unlink()
+-        os.symlink(
+-            os.path.join(
+-                config.info_vars["INSTALLDIR"],
+-                "cron",
+-                config.info_vars["PACKAGE"],
+-            ),
+-            cron_daily_link,
+-        )
++        # This unofficial build does not install a cron job that keeps an
++        # apt repository configured; users add its repository themselves.
+ 
+         for script in ["postinst", "prerm", "postrm"]:
+             dest = staging_dir / "DEBIAN" / script
+diff --git a/chrome/installer/linux/debian/postinst b/chrome/installer/linux/debian/postinst
+index 43f2b1138d..cbc482c81e 100755
+--- a/chrome/installer/linux/debian/postinst
++++ b/chrome/installer/linux/debian/postinst
+@@ -61,7 +61,5 @@ update-alternatives --install /usr/bin/@@package_orig @@package_orig \
+ remove_udev_symlinks
+ 
+ ## MAIN ##
+-install_key
+-install_deb822_sources
+-remove_legacy_list
+-remove_legacy_key
++# This unofficial build does not configure an apt repository or install
++# signing keys; users add its repository themselves.
+diff --git a/chrome/installer/linux/debian/postrm b/chrome/installer/linux/debian/postrm
+index 3e1cadc829..a43e7039de 100755
+--- a/chrome/installer/linux/debian/postrm
++++ b/chrome/installer/linux/debian/postrm
+@@ -31,6 +31,5 @@ if [ -s "$DEFAULTS_FILE" ]; then
+   # In that case, future installs won't recreate it and won't get auto-updated.
+   rm "$DEFAULTS_FILE" || exit 1
+ fi
+-# Remove any Google repository added by the package.
+-clean_sources_lists
+-uninstall_key
++# This unofficial build never adds a repository or key, so there is nothing
++# to remove.
 diff --git a/ui/base/ui_base_features.cc b/ui/base/ui_base_features.cc
-index 0097e5d428..ffd2e73b78 100644
+index c2de37fd82..2e33d940be 100644
 --- a/ui/base/ui_base_features.cc
 +++ b/ui/base/ui_base_features.cc
 @@ -518,7 +518,13 @@ BASE_FEATURE_PARAM(int,
