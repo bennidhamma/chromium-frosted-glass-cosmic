@@ -1,7 +1,7 @@
-From 0b89be3fe40a85742d9042cc6e0c429af167635c Mon Sep 17 00:00:00 2001
+From 9d8af6b638419dd90e8cbca89b5b0896f33506d9 Mon Sep 17 00:00:00 2001
 From: Ben Joldersma <bennidhamma@gmail.com>
 Date: Sat, 10 Oct 2026 16:25:43 -0700
-Subject: [PATCH 3/5] [Linux] Glass frame on Wayland compositors with
+Subject: [PATCH 3/6] [Linux] Glass frame on Wayland compositors with
  background blur
 
 Enable the cross-platform Glass Frame (GlassFrameService,
@@ -21,14 +21,16 @@ through ext-background-effect-v1 instead of NSGlassEffectView:
   region.
 - On Linux the whole top chrome is glass: the toolbar, bookmarks bar,
   active tab and tab strip buttons become translucent
-  (GlassFrameToolbarOpacity), menus of glass windows are translucent
+  (GlassFrameToolbarOpacity) with hovered tabs fainter than the active
+  one, menus of glass windows are translucent
   (GlassFrameMenuOpacity), and chrome:// pages are see-through with
   semi-opaque cards (GlassFrameTransparentWebUI). Web pages can opt in
   with <meta name="theme-color" content="transparent">
   (GlassFrameTransparentWebContentsOptIn), and a param makes all pages
   see-through (GlassFrameTransparentWebContents). The new tab page picks
   up color changes of its window, so it turns see-through when the
-  window becomes glass after the page loaded.
+  window becomes glass after the page loaded, and switching tabs
+  updates whether the contents area is see-through.
 - On Linux every window shows glass, as on desktops like COSMIC that
   frost all windows (GlassFrameMaxWindows limits it); macOS keeps one.
 - GlassFrameService::GetTintOpacity() is shared with macOS.
@@ -44,7 +46,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  chrome/browser/ui/color/chrome_color_mixer.h  |   6 +
  .../browser/ui/color/chrome_color_mixers.cc   |   3 +
  .../color/material_tab_strip_color_mixer.cc   |  21 +-
- chrome/browser/ui/tabs/tab_style.cc           |  13 +-
+ chrome/browser/ui/tabs/tab_style.cc           |  28 +-
  chrome/browser/ui/views/frame/BUILD.gn        |  15 ++
  .../browser_desktop_window_tree_host_linux.cc |  36 ++-
  .../browser_desktop_window_tree_host_linux.h  |   1 +
@@ -56,7 +58,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  .../frame/browser_native_widget_aura_linux.cc |   6 +
  .../frame/browser_native_widget_aura_linux.h  |   4 +
  .../views/frame/browser_native_widget_mac.mm  |  26 +-
- .../ui/views/frame/contents_web_view.cc       |  77 +++++-
+ .../ui/views/frame/contents_web_view.cc       |  84 +++++-
  .../ui/views/frame/contents_web_view.h        |   9 +
  .../ui/views/frame/glass_frame_service.cc     | 110 +++++++-
  .../ui/views/frame/glass_frame_service.h      |  25 +-
@@ -69,9 +71,9 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  .../tabs/common/horizontal_tab_style_views.cc |  17 +-
  .../new_tab_page/new_tab_page_handler.cc      |   5 +
  .../webui/new_tab_page/new_tab_page_handler.h |   8 +-
- ui/base/ui_base_features.cc                   |  38 +++
+ ui/base/ui_base_features.cc                   |  39 +++
  ui/base/ui_base_features.h                    |  19 ++
- 36 files changed, 811 insertions(+), 52 deletions(-)
+ 36 files changed, 831 insertions(+), 55 deletions(-)
 
 diff --git a/chrome/browser/about_flags.cc b/chrome/browser/about_flags.cc
 index fbf4261d9a..4a28aa1103 100644
@@ -299,7 +301,7 @@ index 1f44b27bb4..de64c66eb8 100644
    mixer[kColorTabSearchButtonCRForegroundFrameActive] = {
        ui::kColorSysOnSurfacePrimary};
 diff --git a/chrome/browser/ui/tabs/tab_style.cc b/chrome/browser/ui/tabs/tab_style.cc
-index ae95d2dfc2..dace645c38 100644
+index ae95d2dfc2..c62cffc8e2 100644
 --- a/chrome/browser/ui/tabs/tab_style.cc
 +++ b/chrome/browser/ui/tabs/tab_style.cc
 @@ -6,6 +6,8 @@
@@ -329,6 +331,29 @@ index ae95d2dfc2..dace645c38 100644
      case TabStyle::TabSelectionState::kSelected:
        return color;
      case TabStyle::TabSelectionState::kInactive: {
+@@ -273,10 +284,19 @@ SkColor TabStyle::GetTabBackgroundColor(
+       // hovered color.
+       SkColor inactive_color = GetTabBackgroundColor(
+           state, /*hovered=*/true, frame_active, color_provider);
+-      if (hovered) {
+-        return inactive_color;
++      if (!hovered) {
++        return SkColorSetA(inactive_color, 0);
++      }
++      // When the toolbar and so the active tab are translucent, keep hovered
++      // tabs fainter than the active tab, so that they don't look selected.
++      const double toolbar_opacity = features::kGlassFrameToolbarOpacity.Get();
++      if (toolbar_opacity < 1.0) {
++        return SkColorSetA(
++            inactive_color,
++            base::ClampRound<SkAlpha>(toolbar_opacity / 2 *
++                                      SkColorGetA(inactive_color)));
+       }
+-      return SkColorSetA(inactive_color, 0);
++      return inactive_color;
+     }
+     default:
+       NOTREACHED();
 diff --git a/chrome/browser/ui/views/frame/BUILD.gn b/chrome/browser/ui/views/frame/BUILD.gn
 index 70cffe9c17..5ef409d4dd 100644
 --- a/chrome/browser/ui/views/frame/BUILD.gn
@@ -1039,7 +1064,7 @@ index 73a8db26c2..4419de3439 100644
    const CGFloat r = SkColorGetR(theme_color) / 255.0;
    const CGFloat g = SkColorGetG(theme_color) / 255.0;
 diff --git a/chrome/browser/ui/views/frame/contents_web_view.cc b/chrome/browser/ui/views/frame/contents_web_view.cc
-index 1d0ea60d8f..2d96b212d3 100644
+index 1d0ea60d8f..3420ea10f5 100644
 --- a/chrome/browser/ui/views/frame/contents_web_view.cc
 +++ b/chrome/browser/ui/views/frame/contents_web_view.cc
 @@ -4,9 +4,12 @@
@@ -1073,7 +1098,21 @@ index 1d0ea60d8f..2d96b212d3 100644
  
  #if defined(USE_AURA)
  #include "ui/aura/window.h"
-@@ -200,7 +206,72 @@ void ContentsWebView::DidGetUserInteraction(const blink::WebInputEvent& event) {
+@@ -162,6 +168,13 @@ void ContentsWebView::SetWebContents(content::WebContents* web_contents) {
+ 
+   UpdateIsBlockedByModal();
+ 
++  // The background depends on the contents, e.g. a see-through page may
++  // replace an opaque one, and contents that were in the background may have
++  // missed changes to it.
++  if (GetWidget()) {
++    UpdateBackgroundColor();
++  }
++
+   if (!status_bubble_) {
+     status_bubble_ = std::make_unique<StatusBubbleViews>(this);
+     status_bubble_->Reposition();
+@@ -200,7 +213,72 @@ void ContentsWebView::DidGetUserInteraction(const blink::WebInputEvent& event) {
  }
  #endif
  
@@ -1146,7 +1185,7 @@ index 1d0ea60d8f..2d96b212d3 100644
    const SkColor color = GetColorProvider()->GetColor(
        is_letterboxing() ? kColorWebContentsBackgroundLetterboxing
                          : kColorWebContentsBackground);
-@@ -209,19 +280,19 @@ void ContentsWebView::UpdateBackgroundColor() {
+@@ -209,19 +287,19 @@ void ContentsWebView::UpdateBackgroundColor() {
    // TODO(crbug.com/456309057): Update this to be a CHECK.
    if (SkColorGetA(color) != SK_AlphaOPAQUE) {
      base::debug::DumpWithoutCrashing();
@@ -1722,17 +1761,18 @@ index 07503b9f26..b987ef8e9e 100644
    void OnCustomBackgroundImageUpdated() override;
  
 diff --git a/ui/base/ui_base_features.cc b/ui/base/ui_base_features.cc
-index 3ee35e743d..c2de37fd82 100644
+index 3ee35e743d..0e61e3a196 100644
 --- a/ui/base/ui_base_features.cc
 +++ b/ui/base/ui_base_features.cc
-@@ -521,6 +521,39 @@ BASE_FEATURE(kDesktopGlowUp, base::FEATURE_DISABLED_BY_DEFAULT);
+@@ -521,6 +521,40 @@ BASE_FEATURE(kDesktopGlowUp, base::FEATURE_DISABLED_BY_DEFAULT);
  BASE_FEATURE(kGlassFrame, base::FEATURE_DISABLED_BY_DEFAULT);
  BASE_FEATURE_PARAM(bool, kGlassExpandOnHoverEnabled, &kGlassFrame, true);
  BASE_FEATURE_PARAM(bool, kGlassFrameEnabledByDefault, &kGlassFrame, true);
 +#if BUILDFLAG(IS_LINUX)
 +// Matches how desktops with blur (e.g. COSMIC) frost entire window
-+// backgrounds: the toolbar is only a slightly lighter part of the glass.
-+constexpr double kDefaultGlassFrameToolbarOpacity = 0.2;
++// backgrounds: the toolbar and active tab are a lighter part of the glass,
++// like cards on a COSMIC window.
++constexpr double kDefaultGlassFrameToolbarOpacity = 0.35;
 +// Menus float over arbitrary page content, so they need more opacity to stay
 +// readable.
 +constexpr double kDefaultGlassFrameMenuOpacity = 0.7;
@@ -1765,7 +1805,7 @@ index 3ee35e743d..c2de37fd82 100644
  
  BASE_FEATURE(kRoundedIcons, base::FEATURE_DISABLED_BY_DEFAULT);
  BASE_FEATURE(kWebUIRoundedIcons, base::FEATURE_DISABLED_BY_DEFAULT);
-@@ -548,6 +581,11 @@ bool IsGlassFrameEnabled() {
+@@ -548,6 +582,11 @@ bool IsGlassFrameEnabled() {
  #if BUILDFLAG(IS_MAC)
    return base::mac::MacOSMajorVersion() >= 26 &&
           base::FeatureList::IsEnabled(kGlassFrame);

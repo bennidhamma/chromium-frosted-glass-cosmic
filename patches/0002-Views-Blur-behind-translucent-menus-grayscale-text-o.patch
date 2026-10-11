@@ -1,7 +1,7 @@
 From b82c7bf0184644755c626fc480c9e6d451ee7d5f Mon Sep 17 00:00:00 2001
 From: Ben Joldersma <bennidhamma@gmail.com>
 Date: Sat, 10 Oct 2026 16:25:41 -0700
-Subject: [PATCH 2/5] [Views] Blur behind translucent menus; grayscale text on
+Subject: [PATCH 2/6] [Views] Blur behind translucent menus; grayscale text on
  glass
 
 - MenuScrollViewContainer asks the window system to blur behind the

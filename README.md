@@ -75,7 +75,7 @@ chromium-frosted-glass-stable --enable-features='GlassFrame:GlassFrameToolbarOpa
 |---|---|---|
 | `GlassFrameLinuxTintOpacityLight` / `…Dark` | 0.35 / 0.45 | Tint of the frame over the blurred desktop |
 | `GlassFrameMaxWindows` | 0 (no limit) | Only frost the N most recently active windows (Chrome on macOS uses 1) |
-| `GlassFrameToolbarOpacity` | 0.2 | Toolbar, bookmarks bar and active tab. `1` keeps them opaque (macOS-style) |
+| `GlassFrameToolbarOpacity` | 0.35 | Toolbar, bookmarks bar and active tab. `1` keeps them opaque (macOS-style) |
 | `GlassFrameMenuOpacity` | 0.7 | Menu background. `1` turns frosted menus off |
 | `GlassFrameTransparentWebUI` | true | See-through `chrome://` pages |
 | `GlassFrameTransparentWebContentsOptIn` | true | Let pages opt into being see-through (see below) |
@@ -140,7 +140,8 @@ in [`patches/BASE_REVISION`](patches/BASE_REVISION):
    `chrome://` pages.
 4. **[COSMIC] Work around cosmic-comp blur region placement.** Local only; not for
    upstream.
-5. **[Packaging] Enable the glass frame by default; unofficial branding.** Local
+5. **[COSMIC] Follow COSMIC's glass opacity setting.** Work in progress.
+6. **[Packaging] Enable the glass frame by default; unofficial branding.** Local
    only.
 
 The series is tested as a whole; individual commits are split for review and are

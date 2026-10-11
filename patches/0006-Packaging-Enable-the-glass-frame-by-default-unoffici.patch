@@ -1,7 +1,7 @@
-From f4acc22110f046c9d933070db39fddf20c91cb5b Mon Sep 17 00:00:00 2001
+From 99efa40264ec9acd835ff9680f9edc723aff58f2 Mon Sep 17 00:00:00 2001
 From: Ben Joldersma <bennidhamma@gmail.com>
 Date: Sat, 10 Oct 2026 16:25:47 -0700
-Subject: [PATCH 5/5] [Packaging] Enable the glass frame by default; unofficial
+Subject: [PATCH 6/6] [Packaging] Enable the glass frame by default; unofficial
  branding
 
 - Glass only shows where the compositor supports
@@ -166,7 +166,7 @@ index 3e1cadc829..a43e7039de 100755
 +# This unofficial build never adds a repository or key, so there is nothing
 +# to remove.
 diff --git a/ui/base/ui_base_features.cc b/ui/base/ui_base_features.cc
-index c2de37fd82..2e33d940be 100644
+index 0e61e3a196..1c9f8cd106 100644
 --- a/ui/base/ui_base_features.cc
 +++ b/ui/base/ui_base_features.cc
 @@ -518,7 +518,13 @@ BASE_FEATURE_PARAM(int,

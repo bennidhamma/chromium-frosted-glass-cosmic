@@ -1,7 +1,7 @@
 From 4d2c6fac6f7de0d64ed9b6d24eee28809dc56479 Mon Sep 17 00:00:00 2001
 From: Ben Joldersma <bennidhamma@gmail.com>
 Date: Sat, 10 Oct 2026 16:14:18 -0700
-Subject: [PATCH 1/5] [Ozone/Wayland] Support ext-background-effect-v1
+Subject: [PATCH 1/6] [Ozone/Wayland] Support ext-background-effect-v1
  background blur
 
 Bind ext_background_effect_manager_v1 when the compositor offers it

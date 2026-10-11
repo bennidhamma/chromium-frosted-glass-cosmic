@@ -1,0 +1,488 @@
+From aec33c34912c7f8839ff250adefc4d3e54ec5e85 Mon Sep 17 00:00:00 2001
+From: Ben Joldersma <bennidhamma@gmail.com>
+Date: Sun, 11 Oct 2026 02:27:04 -0700
+Subject: [PATCH 5/6] [COSMIC] Follow COSMIC's glass opacity setting
+
+COSMIC lets users choose how see-through its frosted windows are
+(Settings > Desktop > Appearance > Glass opacity). It stores a
+"frosted" strength in its theme config, which the theme's "alpha_map"
+maps to the alpha of window backgrounds.
+
+CosmicGlassSettings reads and watches these config entries (and the
+light/dark mode) on a blocking sequence when the desktop is COSMIC.
+GlassFrameService::AdjustTintOpacityForDesktop() scales how much of the
+blurred backdrop the glass frame's tint lets through by the same factor
+COSMIC's own windows use relative to its default strength, so the
+browser follows the slider live.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ chrome/browser/ui/views/frame/BUILD.gn        |   4 +
+ .../views/frame/browser_frame_view_linux.cc   |  11 +-
+ .../ui/views/frame/browser_frame_view_linux.h |   1 +
+ .../frame/cosmic_glass_settings_linux.cc      | 220 ++++++++++++++++++
+ .../views/frame/cosmic_glass_settings_linux.h |  49 ++++
+ .../ui/views/frame/glass_frame_service.cc     |  33 +++
+ .../ui/views/frame/glass_frame_service.h      |  22 ++
+ 7 files changed, 339 insertions(+), 1 deletion(-)
+ create mode 100644 chrome/browser/ui/views/frame/cosmic_glass_settings_linux.cc
+ create mode 100644 chrome/browser/ui/views/frame/cosmic_glass_settings_linux.h
+
+diff --git a/chrome/browser/ui/views/frame/BUILD.gn b/chrome/browser/ui/views/frame/BUILD.gn
+index 5ef409d4dd..c7ab48f35b 100644
+--- a/chrome/browser/ui/views/frame/BUILD.gn
++++ b/chrome/browser/ui/views/frame/BUILD.gn
+@@ -643,6 +643,10 @@ source_set("glass_frame_service") {
+     "//ui/base/unowned_user_data",
+   ]
+   if (is_linux) {
++    sources += [
++      "cosmic_glass_settings_linux.cc",
++      "cosmic_glass_settings_linux.h",
++    ]
+     deps += [ "//ui/ozone" ]
+   }
+ }
+diff --git a/chrome/browser/ui/views/frame/browser_frame_view_linux.cc b/chrome/browser/ui/views/frame/browser_frame_view_linux.cc
+index 00c4d2f2af..21ae53138e 100644
+--- a/chrome/browser/ui/views/frame/browser_frame_view_linux.cc
++++ b/chrome/browser/ui/views/frame/browser_frame_view_linux.cc
+@@ -80,6 +80,11 @@ BrowserFrameViewLinux::BrowserFrameViewLinux(
+         glass_frame_service->RegisterMultipleOpenProfilesChangedCallback(
+             base::BindRepeating(&BrowserFrameViewLinux::SchedulePaint,
+                                 base::Unretained(this)));
++    // It also follows the desktop's glass opacity setting.
++    desktop_glass_opacity_subscription_ =
++        glass_frame_service->RegisterDesktopGlassOpacityChangedCallback(
++            base::BindRepeating(&BrowserFrameViewLinux::SchedulePaint,
++                                base::Unretained(this)));
+ 
+     if (features::kGlassFrameToolbarOpacity.Get() < 1.0 &&
+         browser_view->top_container()) {
+@@ -236,10 +241,14 @@ void BrowserFrameViewLinux::PaintGlassFrameBackground(
+   // than blends with what is in the buffer, since its alpha is what lets the
+   // blurred backdrop show through.
+   auto* const glass_frame_service = GlassFrameService::GetInstance();
+-  const double tint_opacity = GlassFrameService::GetTintOpacity(
++  double tint_opacity = GlassFrameService::GetTintOpacity(
+       color_utils::IsDark(frame_color),
+       GetBrowserView()->ShouldDrawVerticalTabStrip(),
+       glass_frame_service && glass_frame_service->HasMultipleOpenProfiles());
++  if (glass_frame_service) {
++    tint_opacity =
++        glass_frame_service->AdjustTintOpacityForDesktop(tint_opacity);
++  }
+   const SkColor tint = SkColorSetA(
+       frame_color, base::ClampRound<SkAlpha>(tint_opacity * SK_AlphaOPAQUE));
+   for (const auto& rect : glass_region) {
+diff --git a/chrome/browser/ui/views/frame/browser_frame_view_linux.h b/chrome/browser/ui/views/frame/browser_frame_view_linux.h
+index c8ad8a2f76..4076270207 100644
+--- a/chrome/browser/ui/views/frame/browser_frame_view_linux.h
++++ b/chrome/browser/ui/views/frame/browser_frame_view_linux.h
+@@ -108,6 +108,7 @@ class BrowserFrameViewLinux : public OpaqueBrowserFrameView,
+   std::vector<gfx::Rect> last_glass_frame_region_;
+   base::CallbackListSubscription glass_frame_eligibility_subscription_;
+   base::CallbackListSubscription multiple_open_profiles_subscription_;
++  base::CallbackListSubscription desktop_glass_opacity_subscription_;
+   std::vector<base::CallbackListSubscription> vertical_tab_strip_subscriptions_;
+   // With a translucent toolbar, the glass extends to the bottom of the top
+   // container, which changes e.g. when the bookmarks bar is shown.
+diff --git a/chrome/browser/ui/views/frame/cosmic_glass_settings_linux.cc b/chrome/browser/ui/views/frame/cosmic_glass_settings_linux.cc
+new file mode 100644
+index 0000000000..fee347b07e
+--- /dev/null
++++ b/chrome/browser/ui/views/frame/cosmic_glass_settings_linux.cc
+@@ -0,0 +1,220 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "chrome/browser/ui/views/frame/cosmic_glass_settings_linux.h"
++
++#include <algorithm>
++#include <functional>
++#include <map>
++#include <optional>
++#include <string>
++#include <string_view>
++#include <utility>
++#include <vector>
++
++#include "base/environment.h"
++#include "base/files/file_path.h"
++#include "base/files/file_path_watcher.h"
++#include "base/files/file_util.h"
++#include "base/functional/bind.h"
++#include "base/logging.h"
++#include "base/memory/ptr_util.h"
++#include "base/nix/xdg_util.h"
++#include "base/strings/string_number_conversions.h"
++#include "base/strings/string_split.h"
++#include "base/strings/string_util.h"
++#include "base/task/bind_post_task.h"
++#include "base/task/thread_pool.h"
++
++namespace {
++
++// COSMIC config entries read here: cosmic/<id>/<version>/<key>.
++constexpr char kModeId[] = "com.system76.CosmicTheme.Mode";
++constexpr char kModeVersion[] = "v1";
++constexpr char kDarkThemeId[] = "com.system76.CosmicTheme.Dark";
++constexpr char kLightThemeId[] = "com.system76.CosmicTheme.Light";
++constexpr char kThemeVersion[] = "v2";
++
++// Entries are small RON values.
++constexpr size_t kMaxEntrySize = 4096;
++
++base::FilePath GetEntryPath(const char* id,
++                            const char* version,
++                            const char* key) {
++  return base::FilePath(id).Append(version).Append(key);
++}
++
++// Reads an entry from the user's config, or else from the system defaults.
++std::optional<std::string> ReadEntry(
++    const base::FilePath& config_dir,
++    const std::vector<base::FilePath>& data_dirs,
++    const base::FilePath& entry) {
++  std::string contents;
++  if (base::ReadFileToStringWithMaxSize(config_dir.Append(entry), &contents,
++                                        kMaxEntrySize)) {
++    return contents;
++  }
++  for (const base::FilePath& data_dir : data_dirs) {
++    if (base::ReadFileToStringWithMaxSize(
++            data_dir.Append("cosmic").Append(entry), &contents,
++            kMaxEntrySize)) {
++      return contents;
++    }
++  }
++  return std::nullopt;
++}
++
++// Converts a RON enum variant like "ExtremelyLow2" to the name of the
++// matching alpha_map field, "extremely_low_2".
++std::string ToFieldName(std::string_view variant) {
++  std::string name;
++  for (const char c : variant) {
++    if (base::IsAsciiUpper(c) || base::IsAsciiDigit(c)) {
++      if (!name.empty()) {
++        name += '_';
++      }
++      name += base::ToLowerASCII(c);
++    } else {
++      name += c;
++    }
++  }
++  return name;
++}
++
++// Parses a RON struct of numbers like "(low: 0.8, medium: 0.76,)".
++std::map<std::string, double, std::less<>> ParseNumberStruct(
++    std::string_view ron) {
++  std::map<std::string, double, std::less<>> fields;
++  ron = base::TrimWhitespaceASCII(ron, base::TRIM_ALL);
++  if (!ron.starts_with('(') || !ron.ends_with(')')) {
++    return fields;
++  }
++  ron = ron.substr(1, ron.size() - 2);
++  for (const std::string_view field : base::SplitStringPiece(
++           ron, ",", base::TRIM_WHITESPACE, base::SPLIT_WANT_NONEMPTY)) {
++    const std::vector<std::string_view> name_and_value = base::SplitStringPiece(
++        field, ":", base::TRIM_WHITESPACE, base::SPLIT_WANT_ALL);
++    double value;
++    if (name_and_value.size() == 2 &&
++        base::StringToDouble(name_and_value[1], &value)) {
++      fields.emplace(name_and_value[0], value);
++    }
++  }
++  return fields;
++}
++
++double ReadBackdropTransparencyScale(
++    const base::FilePath& config_dir,
++    const std::vector<base::FilePath>& data_dirs) {
++  const std::optional<std::string> is_dark = ReadEntry(
++      config_dir, data_dirs, GetEntryPath(kModeId, kModeVersion, "is_dark"));
++  const char* const theme_id =
++      is_dark && base::TrimWhitespaceASCII(*is_dark, base::TRIM_ALL) == "false"
++          ? kLightThemeId
++          : kDarkThemeId;
++  const std::optional<std::string> frosted = ReadEntry(
++      config_dir, data_dirs, GetEntryPath(theme_id, kThemeVersion, "frosted"));
++  const std::optional<std::string> alpha_map =
++      ReadEntry(config_dir, data_dirs,
++                GetEntryPath(theme_id, kThemeVersion, "alpha_map"));
++  if (!frosted || !alpha_map) {
++    return 1.0;
++  }
++
++  const auto alphas = ParseNumberStruct(*alpha_map);
++  const auto alpha = alphas.find(
++      ToFieldName(base::TrimWhitespaceASCII(*frosted, base::TRIM_ALL)));
++  // "Medium" is COSMIC's default strength.
++  const auto default_alpha = alphas.find("medium");
++  if (alpha == alphas.end() || default_alpha == alphas.end() ||
++      default_alpha->second >= 1.0) {
++    return 1.0;
++  }
++  // Compare how much of the backdrop shows through: 1 - alpha.
++  return std::clamp((1.0 - std::clamp(alpha->second, 0.0, 1.0)) /
++                        (1.0 - default_alpha->second),
++                    0.0, 4.0);
++}
++
++}  // namespace
++
++class CosmicGlassSettings::Reader {
++ public:
++  explicit Reader(base::RepeatingCallback<void(double)> on_read)
++      : on_read_(std::move(on_read)) {
++    std::unique_ptr<base::Environment> env = base::Environment::Create();
++    config_dir_ = base::nix::GetXDGDirectory(env.get(),
++                                             base::nix::kXdgConfigHomeEnvVar,
++                                             base::nix::kDotConfigDir)
++                      .Append("cosmic");
++    data_dirs_ = base::nix::GetXDGDataSearchLocations(env.get());
++
++    // Watch the entries of both themes, since the mode can change too.
++    for (const base::FilePath& entry :
++         {GetEntryPath(kModeId, kModeVersion, "is_dark"),
++          GetEntryPath(kDarkThemeId, kThemeVersion, "frosted"),
++          GetEntryPath(kDarkThemeId, kThemeVersion, "alpha_map"),
++          GetEntryPath(kLightThemeId, kThemeVersion, "frosted"),
++          GetEntryPath(kLightThemeId, kThemeVersion, "alpha_map")}) {
++      auto watcher = std::make_unique<base::FilePathWatcher>();
++      // Unretained is safe: `this` owns the watcher.
++      if (watcher->Watch(config_dir_.Append(entry),
++                         base::FilePathWatcher::Type::kNonRecursive,
++                         base::BindRepeating(&Reader::OnEntryChanged,
++                                             base::Unretained(this)))) {
++        watchers_.push_back(std::move(watcher));
++      }
++    }
++    Read();
++  }
++
++  Reader(const Reader&) = delete;
++  Reader& operator=(const Reader&) = delete;
++  ~Reader() = default;
++
++ private:
++  void OnEntryChanged(const base::FilePath& path, bool error) { Read(); }
++
++  void Read() {
++    const double scale = ReadBackdropTransparencyScale(config_dir_, data_dirs_);
++    DVLOG(1) << "COSMIC glass backdrop transparency scale: " << scale;
++    on_read_.Run(scale);
++  }
++
++  base::RepeatingCallback<void(double)> on_read_;
++  base::FilePath config_dir_;
++  std::vector<base::FilePath> data_dirs_;
++  std::vector<std::unique_ptr<base::FilePathWatcher>> watchers_;
++};
++
++// static
++std::unique_ptr<CosmicGlassSettings> CosmicGlassSettings::CreateIfOnCosmic(
++    base::RepeatingClosure on_changed) {
++  const std::optional<std::string> desktop =
++      base::Environment::Create()->GetVar(base::nix::kXdgCurrentDesktopEnvVar);
++  if (!desktop || desktop->find("COSMIC") == std::string::npos) {
++    return nullptr;
++  }
++  return base::WrapUnique(new CosmicGlassSettings(std::move(on_changed)));
++}
++
++CosmicGlassSettings::CosmicGlassSettings(base::RepeatingClosure on_changed)
++    : on_changed_(std::move(on_changed)) {
++  reader_ = base::SequenceBound<Reader>(
++      base::ThreadPool::CreateSequencedTaskRunner(
++          {base::MayBlock(), base::TaskPriority::USER_VISIBLE,
++           base::TaskShutdownBehavior::SKIP_ON_SHUTDOWN}),
++      base::BindPostTaskToCurrentDefault(base::BindRepeating(
++          &CosmicGlassSettings::OnRead, weak_factory_.GetWeakPtr())));
++}
++
++CosmicGlassSettings::~CosmicGlassSettings() = default;
++
++void CosmicGlassSettings::OnRead(double scale) {
++  if (scale == scale_) {
++    return;
++  }
++  scale_ = scale;
++  on_changed_.Run();
++}
+diff --git a/chrome/browser/ui/views/frame/cosmic_glass_settings_linux.h b/chrome/browser/ui/views/frame/cosmic_glass_settings_linux.h
+new file mode 100644
+index 0000000000..2f24b61356
+--- /dev/null
++++ b/chrome/browser/ui/views/frame/cosmic_glass_settings_linux.h
+@@ -0,0 +1,49 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef CHROME_BROWSER_UI_VIEWS_FRAME_COSMIC_GLASS_SETTINGS_LINUX_H_
++#define CHROME_BROWSER_UI_VIEWS_FRAME_COSMIC_GLASS_SETTINGS_LINUX_H_
++
++#include <memory>
++
++#include "base/functional/callback.h"
++#include "base/memory/weak_ptr.h"
++#include "base/threading/sequence_bound.h"
++
++// Follows the glass opacity that the COSMIC desktop gives its own frosted
++// windows (Settings > Desktop > Appearance), so that glass browser windows can
++// match it. COSMIC stores it in its theme config as a "frosted" strength,
++// which maps to the alpha of window backgrounds through the theme's
++// "alpha_map".
++class CosmicGlassSettings {
++ public:
++  // Returns null unless the desktop is COSMIC. `on_changed` runs when the
++  // value of GetBackdropTransparencyScale() changes.
++  static std::unique_ptr<CosmicGlassSettings> CreateIfOnCosmic(
++      base::RepeatingClosure on_changed);
++
++  CosmicGlassSettings(const CosmicGlassSettings&) = delete;
++  CosmicGlassSettings& operator=(const CosmicGlassSettings&) = delete;
++  ~CosmicGlassSettings();
++
++  // How much more (> 1) or less (< 1) of the blurred backdrop COSMIC windows
++  // let through than at COSMIC's default glass opacity. 1 until the settings
++  // are read, or if they can't be.
++  double GetBackdropTransparencyScale() const { return scale_; }
++
++ private:
++  // Reads and watches the config on a sequence that may block.
++  class Reader;
++
++  explicit CosmicGlassSettings(base::RepeatingClosure on_changed);
++
++  void OnRead(double scale);
++
++  double scale_ = 1.0;
++  base::RepeatingClosure on_changed_;
++  base::SequenceBound<Reader> reader_;
++  base::WeakPtrFactory<CosmicGlassSettings> weak_factory_{this};
++};
++
++#endif  // CHROME_BROWSER_UI_VIEWS_FRAME_COSMIC_GLASS_SETTINGS_LINUX_H_
+diff --git a/chrome/browser/ui/views/frame/glass_frame_service.cc b/chrome/browser/ui/views/frame/glass_frame_service.cc
+index d09c64a562..431557e89b 100644
+--- a/chrome/browser/ui/views/frame/glass_frame_service.cc
++++ b/chrome/browser/ui/views/frame/glass_frame_service.cc
+@@ -48,6 +48,7 @@
+ #endif
+ 
+ #if BUILDFLAG(IS_LINUX)
++#include "chrome/browser/ui/views/frame/cosmic_glass_settings_linux.h"
+ #include "ui/ozone/public/ozone_platform.h"
+ #endif
+ 
+@@ -174,6 +175,12 @@ GlassFrameService::GlassFrameService(BrowserProcess& process)
+       BrowserCollection::Order::kActivation);
+   UpdateHasMultipleOpenProfiles();
+ 
++#if BUILDFLAG(IS_LINUX)
++  cosmic_glass_settings_ = CosmicGlassSettings::CreateIfOnCosmic(
++      base::BindRepeating(&GlassFrameService::OnDesktopGlassOpacityChanged,
++                          base::Unretained(this)));
++#endif
++
+   metrics_reporter_ = std::make_unique<GlassFrameMetricsReporter>(
+       g_browser_process->local_state());
+ 
+@@ -243,6 +250,32 @@ size_t GlassFrameService::GetMaxGlassWindows() {
+ #endif
+ }
+ 
++#if BUILDFLAG(IS_LINUX)
++double GlassFrameService::AdjustTintOpacityForDesktop(
++    double tint_opacity) const {
++  if (!cosmic_glass_settings_) {
++    return tint_opacity;
++  }
++  // Let through as much more or less of the backdrop as COSMIC's own windows
++  // do, compared to its default glass opacity. Keep a trace of the tint so
++  // that the frame doesn't vanish into the backdrop.
++  const double backdrop_transparency =
++      (1.0 - tint_opacity) *
++      cosmic_glass_settings_->GetBackdropTransparencyScale();
++  return std::clamp(1.0 - backdrop_transparency, 0.05, 1.0);
++}
++
++base::CallbackListSubscription
++GlassFrameService::RegisterDesktopGlassOpacityChangedCallback(
++    base::RepeatingClosure callback) {
++  return desktop_glass_opacity_callbacks_.Add(std::move(callback));
++}
++
++void GlassFrameService::OnDesktopGlassOpacityChanged() {
++  desktop_glass_opacity_callbacks_.Notify();
++}
++#endif  // BUILDFLAG(IS_LINUX)
++
+ void GlassFrameService::OnPlatformBlurSupportChanged() {
+   OnEligibleStateChanged();
+ }
+diff --git a/chrome/browser/ui/views/frame/glass_frame_service.h b/chrome/browser/ui/views/frame/glass_frame_service.h
+index 85b943b05e..c347f871d1 100644
+--- a/chrome/browser/ui/views/frame/glass_frame_service.h
++++ b/chrome/browser/ui/views/frame/glass_frame_service.h
+@@ -15,6 +15,7 @@
+ #include "base/memory/raw_ptr.h"
+ #include "base/scoped_multi_source_observation.h"
+ #include "base/scoped_observation.h"
++#include "build/build_config.h"
+ #include "chrome/browser/performance_manager/public/user_tuning/battery_saver_mode_manager.h"
+ #include "chrome/browser/themes/theme_service.h"
+ #include "chrome/browser/themes/theme_service_observer.h"
+@@ -23,6 +24,9 @@
+ #include "ui/base/unowned_user_data/scoped_unowned_user_data.h"
+ 
+ class BrowserProcess;
++#if BUILDFLAG(IS_LINUX)
++class CosmicGlassSettings;
++#endif
+ class BrowserWindowInterface;
+ class GlassFrameMetricsReporter;
+ class GlobalBrowserCollection;
+@@ -75,6 +79,16 @@ class GlassFrameService : public BrowserCollectionObserver,
+                                bool is_vertical_tabs,
+                                bool are_multiple_profiles_open);
+ 
++#if BUILDFLAG(IS_LINUX)
++  // Returns `tint_opacity` (see GetTintOpacity()) adjusted to the glass
++  // opacity the desktop uses for its own windows, if it has such a setting.
++  double AdjustTintOpacityForDesktop(double tint_opacity) const;
++
++  // Runs `callback` when the result of AdjustTintOpacityForDesktop() changes.
++  base::CallbackListSubscription RegisterDesktopGlassOpacityChangedCallback(
++      base::RepeatingClosure callback);
++#endif  // BUILDFLAG(IS_LINUX)
++
+   // Called when the window system starts or stops being able to blur what is
+   // behind browser windows, which glass frames depend on.
+   void OnPlatformBlurSupportChanged();
+@@ -136,9 +150,17 @@ class GlassFrameService : public BrowserCollectionObserver,
+ 
+   void UpdateHasMultipleOpenProfiles();
+ 
++#if BUILDFLAG(IS_LINUX)
++  void OnDesktopGlassOpacityChanged();
++#endif
++
+   std::map<BrowserWindowInterface*, base::RepeatingCallbackList<void(bool)>>
+       window_callbacks_;
+   base::RepeatingClosureList multiple_open_profiles_callbacks_;
++#if BUILDFLAG(IS_LINUX)
++  base::RepeatingClosureList desktop_glass_opacity_callbacks_;
++  std::unique_ptr<CosmicGlassSettings> cosmic_glass_settings_;
++#endif
+   std::map<BrowserWindowInterface*, base::CallbackListSubscription>
+       fullscreen_subscriptions_;
+   // Set of tracked normal browsers.
+-- 
+2.43.0
+

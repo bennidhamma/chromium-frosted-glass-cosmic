@@ -1,7 +1,7 @@
-From db4c738b3478e1e299ab4253cb2e71b372fbcab2 Mon Sep 17 00:00:00 2001
+From 6ac464fbc96ab8d40f4d1ae6021352bf2a281f66 Mon Sep 17 00:00:00 2001
 From: Ben Joldersma <bennidhamma@gmail.com>
 Date: Sat, 10 Oct 2026 16:25:45 -0700
-Subject: [PATCH 4/5] [COSMIC] Work around cosmic-comp blur region placement
+Subject: [PATCH 4/6] [COSMIC] Work around cosmic-comp blur region placement
 
 cosmic-comp positions ext-background-effect-v1 blur regions relative to
 the xdg window geometry rather than the surface, and offsets the area it
