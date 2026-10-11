@@ -12,12 +12,14 @@ are contributed by pull request, so if a site you use is missing or looks off,
 
 ## Install
 
-The extension isn't in the Chrome Web Store yet. To install it from this
-repository:
+The extension isn't in the Chrome Web Store yet. To install it:
 
-1. Download the repository (*Code → Download ZIP*) and unpack it, or clone it.
+1. Download `frosted-glass-sites-<version>.zip` from the newest
+   [extension release](https://github.com/bennidhamma/chromium-frosted-glass-cosmic/releases?q=extension)
+   and unpack it somewhere it can stay. Or clone this repository and use its
+   `extension` folder.
 2. Open `chrome://extensions` and turn on *Developer mode*.
-3. Click *Load unpacked* and pick the `extension` folder.
+3. Click *Load unpacked* and pick the unpacked folder.
 
 ## Use
 
