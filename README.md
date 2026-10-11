@@ -29,6 +29,10 @@ that implement the protocol should work too.
 
 ## Install (Ubuntu 24.04 / Pop!_OS 24.04, amd64)
 
+> **Status:** the first package is still being built. Until the
+> [`apt` release][apt-release] exists, `apt update` reports that the repository
+> has no Release file.
+
 ```bash
 sudo curl -fsSLo /usr/share/keyrings/chromium-frosted-glass-cosmic.asc \
   https://raw.githubusercontent.com/bennidhamma/chromium-frosted-glass-cosmic/main/packaging/chromium-frosted-glass-cosmic.asc
