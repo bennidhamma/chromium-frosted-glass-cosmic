@@ -1,30 +1,30 @@
-From aec33c34912c7f8839ff250adefc4d3e54ec5e85 Mon Sep 17 00:00:00 2001
+From 17961d545fda10b47bf3ed19632c6221095a2ae1 Mon Sep 17 00:00:00 2001
 From: Ben Joldersma <bennidhamma@gmail.com>
 Date: Sun, 11 Oct 2026 02:27:04 -0700
 Subject: [PATCH 5/6] [COSMIC] Follow COSMIC's glass opacity setting
 
 COSMIC lets users choose how see-through its frosted windows are
-(Settings > Desktop > Appearance > Glass opacity). It stores a
-"frosted" strength in its theme config, which the theme's "alpha_map"
-maps to the alpha of window backgrounds.
+(Settings > Desktop > Appearance). In its theme config, "frost
+thickness" picks an entry of the "alpha_map", the alpha of window
+backgrounds, and "glass opacity" shifts the whole map.
 
 CosmicGlassSettings reads and watches these config entries (and the
 light/dark mode) on a blocking sequence when the desktop is COSMIC.
-GlassFrameService::AdjustTintOpacityForDesktop() scales how much of the
-blurred backdrop the glass frame's tint lets through by the same factor
-COSMIC's own windows use relative to its default strength, so the
-browser follows the slider live.
+GlassFrameService::AdjustTintOpacityForDesktop() maps the glass frame's
+tint so that COSMIC's default alpha gives the default tint, stretching
+the ranges on either side to fit, so the browser follows both sliders
+live.
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
  chrome/browser/ui/views/frame/BUILD.gn        |   4 +
  .../views/frame/browser_frame_view_linux.cc   |  11 +-
  .../ui/views/frame/browser_frame_view_linux.h |   1 +
- .../frame/cosmic_glass_settings_linux.cc      | 220 ++++++++++++++++++
- .../views/frame/cosmic_glass_settings_linux.h |  49 ++++
- .../ui/views/frame/glass_frame_service.cc     |  33 +++
+ .../frame/cosmic_glass_settings_linux.cc      | 261 ++++++++++++++++++
+ .../views/frame/cosmic_glass_settings_linux.h |  59 ++++
+ .../ui/views/frame/glass_frame_service.cc     |  27 ++
  .../ui/views/frame/glass_frame_service.h      |  22 ++
- 7 files changed, 339 insertions(+), 1 deletion(-)
+ 7 files changed, 384 insertions(+), 1 deletion(-)
  create mode 100644 chrome/browser/ui/views/frame/cosmic_glass_settings_linux.cc
  create mode 100644 chrome/browser/ui/views/frame/cosmic_glass_settings_linux.h
 
@@ -89,10 +89,10 @@ index c8ad8a2f76..4076270207 100644
    // container, which changes e.g. when the bookmarks bar is shown.
 diff --git a/chrome/browser/ui/views/frame/cosmic_glass_settings_linux.cc b/chrome/browser/ui/views/frame/cosmic_glass_settings_linux.cc
 new file mode 100644
-index 0000000000..fee347b07e
+index 0000000000..f3f9206731
 --- /dev/null
 +++ b/chrome/browser/ui/views/frame/cosmic_glass_settings_linux.cc
-@@ -0,0 +1,220 @@
+@@ -0,0 +1,261 @@
 +// Copyright 2026 The Chromium Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -134,10 +134,29 @@ index 0000000000..fee347b07e
 +// Entries are small RON values.
 +constexpr size_t kMaxEntrySize = 4096;
 +
++// The alpha of COSMIC's default glass: the "medium" entry of libcosmic's
++// default AlphaMap.
++constexpr double kDefaultAlpha = 0.76154;
++
 +base::FilePath GetEntryPath(const char* id,
 +                            const char* version,
 +                            const char* key) {
 +  return base::FilePath(id).Append(version).Append(key);
++}
++
++// Reads an entry from the system defaults.
++std::optional<std::string> ReadDefaultEntry(
++    const std::vector<base::FilePath>& data_dirs,
++    const base::FilePath& entry) {
++  std::string contents;
++  for (const base::FilePath& data_dir : data_dirs) {
++    if (base::ReadFileToStringWithMaxSize(
++            data_dir.Append("cosmic").Append(entry), &contents,
++            kMaxEntrySize)) {
++      return contents;
++    }
++  }
++  return std::nullopt;
 +}
 +
 +// Reads an entry from the user's config, or else from the system defaults.
@@ -150,14 +169,7 @@ index 0000000000..fee347b07e
 +                                        kMaxEntrySize)) {
 +    return contents;
 +  }
-+  for (const base::FilePath& data_dir : data_dirs) {
-+    if (base::ReadFileToStringWithMaxSize(
-+            data_dir.Append("cosmic").Append(entry), &contents,
-+            kMaxEntrySize)) {
-+      return contents;
-+    }
-+  }
-+  return std::nullopt;
++  return ReadDefaultEntry(data_dirs, entry);
 +}
 +
 +// Converts a RON enum variant like "ExtremelyLow2" to the name of the
@@ -199,7 +211,7 @@ index 0000000000..fee347b07e
 +  return fields;
 +}
 +
-+double ReadBackdropTransparencyScale(
++std::optional<CosmicGlassSettings::Alphas> ReadAlphas(
 +    const base::FilePath& config_dir,
 +    const std::vector<base::FilePath>& data_dirs) {
 +  const std::optional<std::string> is_dark = ReadEntry(
@@ -214,29 +226,41 @@ index 0000000000..fee347b07e
 +      ReadEntry(config_dir, data_dirs,
 +                GetEntryPath(theme_id, kThemeVersion, "alpha_map"));
 +  if (!frosted || !alpha_map) {
-+    return 1.0;
++    return std::nullopt;
 +  }
 +
++  // The "frost thickness" setting picks an entry of the alpha map, and the
++  // "glass opacity" setting shifts the whole map.
 +  const auto alphas = ParseNumberStruct(*alpha_map);
 +  const auto alpha = alphas.find(
 +      ToFieldName(base::TrimWhitespaceASCII(*frosted, base::TRIM_ALL)));
-+  // "Medium" is COSMIC's default strength.
-+  const auto default_alpha = alphas.find("medium");
-+  if (alpha == alphas.end() || default_alpha == alphas.end() ||
-+      default_alpha->second >= 1.0) {
-+    return 1.0;
++  if (alpha == alphas.end()) {
++    return std::nullopt;
 +  }
-+  // Compare how much of the backdrop shows through: 1 - alpha.
-+  return std::clamp((1.0 - std::clamp(alpha->second, 0.0, 1.0)) /
-+                        (1.0 - default_alpha->second),
-+                    0.0, 4.0);
++
++  // Compare with COSMIC's default glass: the default thickness ("medium") in
++  // the default, unshifted alpha map.
++  double default_alpha = kDefaultAlpha;
++  if (const std::optional<std::string> default_alpha_map = ReadDefaultEntry(
++          data_dirs, GetEntryPath(theme_id, kThemeVersion, "alpha_map"))) {
++    const auto default_alphas = ParseNumberStruct(*default_alpha_map);
++    if (const auto medium = default_alphas.find("medium");
++        medium != default_alphas.end() && medium->second < 1.0) {
++      default_alpha = medium->second;
++    }
++  }
++
++  return CosmicGlassSettings::Alphas{
++      .alpha = std::clamp(alpha->second, 0.0, 1.0),
++      .default_alpha = default_alpha};
 +}
 +
 +}  // namespace
 +
 +class CosmicGlassSettings::Reader {
 + public:
-+  explicit Reader(base::RepeatingCallback<void(double)> on_read)
++  explicit Reader(
++      base::RepeatingCallback<void(std::optional<Alphas>)> on_read)
 +      : on_read_(std::move(on_read)) {
 +    std::unique_ptr<base::Environment> env = base::Environment::Create();
 +    config_dir_ = base::nix::GetXDGDirectory(env.get(),
@@ -272,12 +296,14 @@ index 0000000000..fee347b07e
 +  void OnEntryChanged(const base::FilePath& path, bool error) { Read(); }
 +
 +  void Read() {
-+    const double scale = ReadBackdropTransparencyScale(config_dir_, data_dirs_);
-+    DVLOG(1) << "COSMIC glass backdrop transparency scale: " << scale;
-+    on_read_.Run(scale);
++    const std::optional<Alphas> alphas = ReadAlphas(config_dir_, data_dirs_);
++    DVLOG(1) << "COSMIC glass alpha: "
++             << (alphas ? alphas->alpha : -1) << ", default: "
++             << (alphas ? alphas->default_alpha : -1);
++    on_read_.Run(alphas);
 +  }
 +
-+  base::RepeatingCallback<void(double)> on_read_;
++  base::RepeatingCallback<void(std::optional<Alphas>)> on_read_;
 +  base::FilePath config_dir_;
 +  std::vector<base::FilePath> data_dirs_;
 +  std::vector<std::unique_ptr<base::FilePathWatcher>> watchers_;
@@ -306,19 +332,34 @@ index 0000000000..fee347b07e
 +
 +CosmicGlassSettings::~CosmicGlassSettings() = default;
 +
-+void CosmicGlassSettings::OnRead(double scale) {
-+  if (scale == scale_) {
++double CosmicGlassSettings::AdjustOpacity(double opacity) const {
++  if (!alphas_) {
++    return opacity;
++  }
++  // COSMIC's default alpha maps to `opacity`, and the ranges on either side of
++  // it stretch to fit, so that all of COSMIC's settings have an effect: fully
++  // transparent stays fully transparent, and opaque stays opaque.
++  const auto [alpha, default_alpha] = *alphas_;
++  if (alpha <= default_alpha) {
++    return opacity * alpha / default_alpha;
++  }
++  return opacity + (1.0 - opacity) * (alpha - default_alpha) /
++                       (1.0 - default_alpha);
++}
++
++void CosmicGlassSettings::OnRead(std::optional<Alphas> alphas) {
++  if (alphas == alphas_) {
 +    return;
 +  }
-+  scale_ = scale;
++  alphas_ = alphas;
 +  on_changed_.Run();
 +}
 diff --git a/chrome/browser/ui/views/frame/cosmic_glass_settings_linux.h b/chrome/browser/ui/views/frame/cosmic_glass_settings_linux.h
 new file mode 100644
-index 0000000000..2f24b61356
+index 0000000000..bf35be067a
 --- /dev/null
 +++ b/chrome/browser/ui/views/frame/cosmic_glass_settings_linux.h
-@@ -0,0 +1,49 @@
+@@ -0,0 +1,59 @@
 +// Copyright 2026 The Chromium Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -327,6 +368,7 @@ index 0000000000..2f24b61356
 +#define CHROME_BROWSER_UI_VIEWS_FRAME_COSMIC_GLASS_SETTINGS_LINUX_H_
 +
 +#include <memory>
++#include <optional>
 +
 +#include "base/functional/callback.h"
 +#include "base/memory/weak_ptr.h"
@@ -334,13 +376,13 @@ index 0000000000..2f24b61356
 +
 +// Follows the glass opacity that the COSMIC desktop gives its own frosted
 +// windows (Settings > Desktop > Appearance), so that glass browser windows can
-+// match it. COSMIC stores it in its theme config as a "frosted" strength,
-+// which maps to the alpha of window backgrounds through the theme's
-+// "alpha_map".
++// match it. In COSMIC's theme config, the "frost thickness" setting picks an
++// entry of the "alpha_map", the alpha of window backgrounds, and the "glass
++// opacity" setting shifts the whole map.
 +class CosmicGlassSettings {
 + public:
 +  // Returns null unless the desktop is COSMIC. `on_changed` runs when the
-+  // value of GetBackdropTransparencyScale() changes.
++  // result of AdjustOpacity() changes.
 +  static std::unique_ptr<CosmicGlassSettings> CreateIfOnCosmic(
 +      base::RepeatingClosure on_changed);
 +
@@ -348,10 +390,19 @@ index 0000000000..2f24b61356
 +  CosmicGlassSettings& operator=(const CosmicGlassSettings&) = delete;
 +  ~CosmicGlassSettings();
 +
-+  // How much more (> 1) or less (< 1) of the blurred backdrop COSMIC windows
-+  // let through than at COSMIC's default glass opacity. 1 until the settings
-+  // are read, or if they can't be.
-+  double GetBackdropTransparencyScale() const { return scale_; }
++  // Adjusts `opacity`, chosen to look right with COSMIC's default glass, to
++  // the user's settings. Returns `opacity` until the settings are read, or if
++  // they can't be.
++  double AdjustOpacity(double opacity) const;
++
++  // The alpha of COSMIC's window backgrounds, with the user's settings and
++  // with the default ones.
++  struct Alphas {
++    bool operator==(const Alphas&) const = default;
++
++    double alpha = 0;
++    double default_alpha = 0;
++  };
 +
 + private:
 +  // Reads and watches the config on a sequence that may block.
@@ -359,9 +410,9 @@ index 0000000000..2f24b61356
 +
 +  explicit CosmicGlassSettings(base::RepeatingClosure on_changed);
 +
-+  void OnRead(double scale);
++  void OnRead(std::optional<Alphas> alphas);
 +
-+  double scale_ = 1.0;
++  std::optional<Alphas> alphas_;
 +  base::RepeatingClosure on_changed_;
 +  base::SequenceBound<Reader> reader_;
 +  base::WeakPtrFactory<CosmicGlassSettings> weak_factory_{this};
@@ -369,7 +420,7 @@ index 0000000000..2f24b61356
 +
 +#endif  // CHROME_BROWSER_UI_VIEWS_FRAME_COSMIC_GLASS_SETTINGS_LINUX_H_
 diff --git a/chrome/browser/ui/views/frame/glass_frame_service.cc b/chrome/browser/ui/views/frame/glass_frame_service.cc
-index d09c64a562..431557e89b 100644
+index d09c64a562..252109476d 100644
 --- a/chrome/browser/ui/views/frame/glass_frame_service.cc
 +++ b/chrome/browser/ui/views/frame/glass_frame_service.cc
 @@ -48,6 +48,7 @@
@@ -393,23 +444,17 @@ index d09c64a562..431557e89b 100644
    metrics_reporter_ = std::make_unique<GlassFrameMetricsReporter>(
        g_browser_process->local_state());
  
-@@ -243,6 +250,32 @@ size_t GlassFrameService::GetMaxGlassWindows() {
+@@ -243,6 +250,26 @@ size_t GlassFrameService::GetMaxGlassWindows() {
  #endif
  }
  
 +#if BUILDFLAG(IS_LINUX)
 +double GlassFrameService::AdjustTintOpacityForDesktop(
 +    double tint_opacity) const {
-+  if (!cosmic_glass_settings_) {
-+    return tint_opacity;
-+  }
-+  // Let through as much more or less of the backdrop as COSMIC's own windows
-+  // do, compared to its default glass opacity. Keep a trace of the tint so
-+  // that the frame doesn't vanish into the backdrop.
-+  const double backdrop_transparency =
-+      (1.0 - tint_opacity) *
-+      cosmic_glass_settings_->GetBackdropTransparencyScale();
-+  return std::clamp(1.0 - backdrop_transparency, 0.05, 1.0);
++  // The default tint matches COSMIC's default glass.
++  return cosmic_glass_settings_
++             ? cosmic_glass_settings_->AdjustOpacity(tint_opacity)
++             : tint_opacity;
 +}
 +
 +base::CallbackListSubscription

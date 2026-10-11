@@ -24,6 +24,9 @@ that implement the protocol should work too.
   [Frosted pages](#frosted-pages-for-web-developers). All other sites stay opaque,
   unless you turn them on with the [Frosted Glass Sites](#frosted-glass-sites)
   extension.
+- **Follows COSMIC's frosted glass settings.** *Frost thickness* and *Glass
+  opacity* in *Settings → Desktop → Appearance* make the browser more or less
+  see-through along with COSMIC's own windows, live.
 - Every window is frosted. Glass builds on Chrome's [Glass Frame][glass-frame]
   and, like it, turns off in fullscreen, with battery saver, or with an extension
   theme. It can be turned off in *Settings → Appearance → Tab styling*.
@@ -75,7 +78,7 @@ chromium-frosted-glass-stable --enable-features='GlassFrame:GlassFrameToolbarOpa
 
 | Parameter | Default (Linux) | Meaning |
 |---|---|---|
-| `GlassFrameLinuxTintOpacityLight` / `…Dark` | 0.35 / 0.45 | Tint of the frame over the blurred desktop |
+| `GlassFrameLinuxTintOpacityLight` / `…Dark` | 0.35 / 0.45 | Tint of the frame over the blurred desktop, at COSMIC's default glass settings |
 | `GlassFrameMaxWindows` | 0 (no limit) | Only frost the N most recently active windows (Chrome on macOS uses 1) |
 | `GlassFrameToolbarOpacity` | 0.35 | Toolbar, bookmarks bar and active tab. `1` keeps them opaque (macOS-style) |
 | `GlassFrameMenuOpacity` | 0.7 | Menu background. `1` turns frosted menus off |
@@ -154,7 +157,7 @@ in [`patches/BASE_REVISION`](patches/BASE_REVISION):
    `chrome://` pages.
 4. **[COSMIC] Work around cosmic-comp blur region placement.** Local only; not for
    upstream.
-5. **[COSMIC] Follow COSMIC's glass opacity setting.** Work in progress.
+5. **[COSMIC] Follow COSMIC's glass opacity setting.**
 6. **[Packaging] Enable the glass frame by default; unofficial branding.** Local
    only.
 
@@ -172,9 +175,11 @@ packaging/build-deb.sh ~/chromium/src
 ```
 
 That applies the patches, builds with [`packaging/args.gn`](packaging/args.gn) and
-produces `out/Release/dist/chromium-frosted-glass-stable_<version>-1_amd64.deb`.
+produces `out/Release/dist/chromium-frosted-glass-stable_<version>-<revision>_amd64.deb`.
 [`packaging/publish-apt.sh`](packaging/publish-apt.sh) signs and publishes packages
-to the `apt` release.
+to the `apt` release. When the patches change without a Chromium update, bump
+`PACKAGE_RELEASE` in `chrome/installer/linux/common/chromium-browser.info` (patch 6)
+so that apt sees a new version.
 
 ## Demo
 

@@ -1,4 +1,4 @@
-From 99efa40264ec9acd835ff9680f9edc723aff58f2 Mon Sep 17 00:00:00 2001
+From f0707200ae760423c58f5740996c5111f1aafc1c Mon Sep 17 00:00:00 2001
 From: Ben Joldersma <bennidhamma@gmail.com>
 Date: Sat, 10 Oct 2026 16:25:47 -0700
 Subject: [PATCH 6/6] [Packaging] Enable the glass frame by default; unofficial
@@ -12,16 +12,19 @@ Subject: [PATCH 6/6] [Packaging] Enable the glass frame by default; unofficial
   nor conflicts with one.
 - Don't install the cron job, apt sources or signing key that point at
   Google's repository. Users add this build's repository themselves.
+- Take the package revision from PACKAGE_RELEASE in the .info file, so
+  that patch updates get a new package version.
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
  chrome/installer/linux/BUILD.gn               |  3 +-
- .../linux/common/chromium-browser.info        | 20 ++++++------
+ .../linux/common/chromium-browser.info        | 23 ++++++++------
+ chrome/installer/linux/common/installer.py    |  2 +-
  chrome/installer/linux/debian/build.py        | 31 ++-----------------
  chrome/installer/linux/debian/postinst        |  6 ++--
  chrome/installer/linux/debian/postrm          |  5 ++-
  ui/base/ui_base_features.cc                   |  6 ++++
- 6 files changed, 24 insertions(+), 47 deletions(-)
+ 7 files changed, 28 insertions(+), 48 deletions(-)
 
 diff --git a/chrome/installer/linux/BUILD.gn b/chrome/installer/linux/BUILD.gn
 index 2a75b4c07d..72e8696506 100644
@@ -38,15 +41,18 @@ index 2a75b4c07d..72e8696506 100644
  
    deb_target_name = "${target_name}_deb"
 diff --git a/chrome/installer/linux/common/chromium-browser.info b/chrome/installer/linux/common/chromium-browser.info
-index 395c019f7d..47df1584a7 100644
+index 395c019f7d..50ad1ba8ea 100644
 --- a/chrome/installer/linux/common/chromium-browser.info
 +++ b/chrome/installer/linux/common/chromium-browser.info
-@@ -6,37 +6,37 @@
+@@ -6,37 +6,40 @@
  # chromium-browser packages for various platforms.
  
  # Base name of the package.
 -PACKAGE="chromium-browser"
 +PACKAGE="chromium-frosted-glass"
++# Package revision for the Chromium version. Bump it when the patches change
++# without a Chromium update, so that apt sees a new version.
++PACKAGE_RELEASE=2
  
  # Filename of the main executable (for generating launcher scripts, etc.)
  PROGNAME=chrome
@@ -89,6 +95,19 @@ index 395c019f7d..47df1584a7 100644
  
 -RDN="org.chromium.Chromium"
 +RDN="io.github.bennidhamma.ChromiumFrostedGlass"
+diff --git a/chrome/installer/linux/common/installer.py b/chrome/installer/linux/common/installer.py
+index b2b6f8c06d..d79cfb2b00 100644
+--- a/chrome/installer/linux/common/installer.py
++++ b/chrome/installer/linux/common/installer.py
+@@ -513,7 +513,7 @@ class InstallerConfig:
+             f"{data['version_vars']['MAJOR']}.{data['version_vars']['MINOR']}."
+             f"{data['version_vars']['BUILD']}.{data['version_vars']['PATCH']}"
+         )
+-        data["package_release"] = "1"
++        data["package_release"] = data["info_vars"].get("PACKAGE_RELEASE", "1")
+ 
+         # Verify channel
+         channel, data["releasenotes"] = normalize_channel(channel)
 diff --git a/chrome/installer/linux/debian/build.py b/chrome/installer/linux/debian/build.py
 index e9d12851e3..cc1a371d5e 100755
 --- a/chrome/installer/linux/debian/build.py
