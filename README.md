@@ -191,6 +191,14 @@ page with CSS `backdrop-filter`, which works in any current browser. Its *Deskto
 mode* button (or `?desktop` in the URL) uses the opt-in above, so in this build the
 cards float on your frosted desktop.
 
+## Tauri app
+
+[`tauri/`](tauri/) is the demo as a native [Tauri](https://tauri.app) app that
+COSMIC frosts like its own windows: it asks for blur behind its window from Rust,
+with the same `ext-background-effect-v1` protocol, and follows COSMIC's glass
+settings live. It also shows off a little of Tauri: Rust commands and events,
+notifications and a custom title bar. See [`tauri/README.md`](tauri/README.md).
+
 ## License
 
 The patches modify Chromium and are under Chromium's

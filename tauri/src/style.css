@@ -1,0 +1,240 @@
+/* The window is transparent: the compositor blurs the desktop behind it, and
+   .window tints that blur with COSMIC's window color. */
+:root {
+  --radius: 12px;
+  /* Set from COSMIC's theme by main.js. */
+  --glass-rgb: 27 29 34;
+  --glass-alpha: 0.45;
+
+  --ink: #f2f4f8;
+  --muted: rgb(242 244 248 / 0.68);
+  --card: rgb(255 255 255 / 0.08);
+  --card-border: rgb(255 255 255 / 0.14);
+  --control: rgb(255 255 255 / 0.10);
+  --control-hover: rgb(255 255 255 / 0.18);
+  --accent: #94ebeb;
+  --accent-ink: #0b2525;
+}
+
+:root[data-theme="light"] {
+  --ink: #1c1d20;
+  --muted: rgb(28 29 32 / 0.66);
+  --card: rgb(255 255 255 / 0.45);
+  --card-border: rgb(0 0 0 / 0.08);
+  --control: rgb(0 0 0 / 0.06);
+  --control-hover: rgb(0 0 0 / 0.12);
+  --accent: #00525a;
+  --accent-ink: #ffffff;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  height: 100%;
+  background: transparent;
+  overflow: hidden;
+  font: 14px/1.5 "Open Sans", "Fira Sans", system-ui, sans-serif;
+  color: var(--ink);
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.window {
+  position: relative;
+  height: 100%;
+  overflow: hidden;
+  border-radius: var(--radius);
+  border: 1px solid rgb(255 255 255 / 0.12);
+  background: rgb(var(--glass-rgb) / var(--glass-alpha));
+  transition: background-color 0.25s;
+}
+
+:root[data-theme="light"] .window { border-color: rgb(0 0 0 / 0.12); }
+:root.maximized { --radius: 0px; }
+:root.maximized .window { border: none; }
+
+/* The page's own backdrop, for CSS backdrop-filter. */
+.backdrop {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  opacity: 0;
+  transition: opacity 0.4s;
+  pointer-events: none;
+}
+:root.backdrop-on .backdrop { opacity: 1; }
+.blob {
+  position: absolute;
+  width: 46vmax;
+  height: 46vmax;
+  border-radius: 50%;
+  opacity: 0.85;
+  animation: drift 18s ease-in-out infinite alternate;
+}
+.blob.a { background: radial-gradient(circle at 30% 30%, #ff7ab6, #b5179e 60%, transparent 70%); left: -10vmax; top: -12vmax; }
+.blob.b { background: radial-gradient(circle at 60% 40%, #4cc9f0, #4361ee 60%, transparent 70%); right: -14vmax; top: 10vmax; animation-duration: 22s; }
+.blob.c { background: radial-gradient(circle at 50% 50%, #ffd166, #f77f00 60%, transparent 70%); left: 20vmax; bottom: -20vmax; animation-duration: 26s; }
+.blob.d { background: radial-gradient(circle at 40% 60%, #80ffdb, #06d6a0 60%, transparent 70%); right: 10vmax; bottom: -10vmax; animation-duration: 15s; }
+.stripes {
+  position: absolute;
+  inset: 0;
+  background: repeating-linear-gradient(115deg, rgb(255 255 255 / 0.08) 0 2px, transparent 2px 28px);
+  animation: slide 12s linear infinite;
+}
+.word {
+  position: absolute;
+  left: 4vw;
+  top: 30vh;
+  font-weight: 900;
+  font-size: 18vw;
+  letter-spacing: -0.04em;
+  color: rgb(255 255 255 / 0.85);
+  white-space: nowrap;
+  animation: slide-word 20s ease-in-out infinite alternate;
+}
+@keyframes drift { to { transform: translate(12vmax, 8vmax) scale(1.15); } }
+@keyframes slide { to { background-position: 400px 0; } }
+@keyframes slide-word { to { transform: translateX(-30vw); } }
+
+/* Title bar, drawn by the app since the window is undecorated. */
+.titlebar {
+  position: relative;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: 48px;
+  padding: 0 8px 0 16px;
+}
+.title { display: flex; align-items: center; gap: 10px; font-weight: 600; }
+.subtitle { font-weight: 400; color: var(--muted); }
+.logo {
+  width: 20px;
+  height: 20px;
+  border-radius: 6px;
+  background: url("assets/icon.png") center / cover;
+}
+.controls { display: flex; gap: 8px; }
+.control {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border: none;
+  border-radius: 50%;
+  background: var(--control);
+  color: var(--ink);
+  cursor: pointer;
+}
+.control svg { width: 14px; height: 14px; fill: currentColor; }
+.control:hover { background: var(--control-hover); }
+.control.close:hover { background: #e5484d; color: #fff; }
+.control[aria-pressed="true"] { background: var(--accent); color: var(--accent-ink); }
+
+/* Cards, which can be dragged around. */
+.stage { position: absolute; inset: 48px 0 0; }
+
+.card {
+  position: absolute;
+  width: 460px;
+  padding: 20px 22px;
+  border-radius: 16px;
+  background: var(--card);
+  border: 1px solid var(--card-border);
+  box-shadow: 0 10px 40px rgb(0 0 0 / 0.18);
+  -webkit-backdrop-filter: blur(24px) saturate(160%);
+  backdrop-filter: blur(24px) saturate(160%);
+  cursor: grab;
+  touch-action: none;
+}
+.card:active { cursor: grabbing; }
+.card:not(.hero) { width: 360px; }
+.card.native { width: 460px; }
+
+h1, h2 { margin: 0 0 8px; letter-spacing: -0.01em; }
+h1 { font-size: 26px; }
+h2 { font-size: 16px; }
+p { margin: 0 0 14px; color: var(--muted); }
+code {
+  font: 12.5px ui-monospace, "Fira Mono", monospace;
+  padding: 1px 5px;
+  border-radius: 5px;
+  background: var(--control);
+}
+
+.rows { display: grid; gap: 10px; }
+.row {
+  display: grid;
+  grid-template-columns: 130px 1fr auto;
+  align-items: center;
+  gap: 12px;
+  cursor: default;
+}
+.row output { min-width: 3ch; color: var(--muted); font-variant-numeric: tabular-nums; }
+input[type="range"] { width: 100%; accent-color: var(--accent); }
+.row input:disabled { opacity: 0.4; }
+
+.switch {
+  appearance: none;
+  -webkit-appearance: none;
+  justify-self: start;
+  width: 40px;
+  height: 22px;
+  margin: 0;
+  border-radius: 11px;
+  background: var(--control-hover);
+  position: relative;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+.switch::after {
+  content: "";
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--ink);
+  transition: transform 0.2s;
+}
+.switch:checked { background: var(--accent); }
+.switch:checked::after { transform: translateX(18px); background: var(--accent-ink); }
+
+.status { margin: 14px 0 0; font-size: 13px; }
+
+dl {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 4px 16px;
+  margin: 0;
+}
+dt { color: var(--muted); }
+dd { margin: 0; overflow-wrap: anywhere; }
+
+.log {
+  margin: 12px 0 0;
+  padding: 0;
+  list-style: none;
+  font-size: 12.5px;
+  color: var(--muted);
+  max-height: 96px;
+  overflow: hidden;
+}
+.log li { animation: arrive 0.6s; }
+@keyframes arrive { from { color: var(--accent); transform: translateX(-4px); } }
+
+.buttons { display: flex; gap: 10px; flex-wrap: wrap; }
+.button {
+  padding: 8px 16px;
+  border: none;
+  border-radius: 999px;
+  background: var(--control);
+  color: var(--ink);
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+.button:hover { background: var(--control-hover); }
+.button[aria-pressed="true"] { background: var(--accent); color: var(--accent-ink); }
